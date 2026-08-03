@@ -266,7 +266,7 @@ class TradingStrategyEngine:
         return df
 
 # ==========================================
-# 3. 歷史回測引擎 (邏輯優化版)
+# 3. 歷史回測引擎 (完美斜率與冷卻防禦版)
 # ==========================================
 class StrategyBacktester:
     def __init__(self, df: pd.DataFrame, initial_capital: float = 200000.0, start_date: str = None, end_date: str = None):
@@ -286,7 +286,13 @@ class StrategyBacktester:
         
         took_profit_15 = False
         took_atr_profit = False
-        has_crossed_ma20 = False  # 標記：持股期間價格是否曾成功站上 MA20
+        has_crossed_ma20 = False
+        cooldown_counter = 0        # 🛡️ 清倉冷卻計數器
+        last_trade_was_loss = False # 紀錄上一筆是否停損
+        
+        # 📐 均線斜率防守參數：MA20 5日下彎斜率超過 -1.5% 時禁止左側抄底
+        ma20_slope_threshold = -1.5
+        
         highest_price_since_entry = 0.0
         last_add_price = 0.0
         
@@ -311,6 +317,7 @@ class StrategyBacktester:
             ma5 = float(today['MA5']) if not np.isnan(today['MA5']) else price
             ma10 = float(today['MA10']) if not np.isnan(today['MA10']) else price
             ma20 = float(today['MA20']) if not np.isnan(today['MA20']) else price
+            ma60 = float(today['MA60']) if not np.isnan(today['MA60']) else price
             rsi14 = float(today['RSI14']) if not np.isnan(today['RSI14']) else 50.0
             temp = float(today['Temperature']) if not np.isnan(today['Temperature']) else 50.0
             atr14 = float(today['ATR14']) if not np.isnan(today['ATR14']) else 0.0
@@ -318,16 +325,27 @@ class StrategyBacktester:
             yesterday_close = float(yesterday['Close'])
             yesterday_ma10 = float(yesterday['MA10']) if not np.isnan(yesterday['MA10']) else yesterday_close
 
-            # RSI 底背離 (20日波段新低 + 陽線止跌)
+            # 冷卻期倒數
+            if cooldown_counter > 0:
+                cooldown_counter -= 1
+
+            # 📐 計算 MA20 的 5 日變化斜率百分比
+            if i >= 25:
+                ma20_5d_ago = float(df.iloc[i-5]['MA20'])
+                ma20_slope_5d = ((ma20 - ma20_5d_ago) / ma20_5d_ago) * 100.0 if ma20_5d_ago > 0 else 0.0
+            else:
+                ma20_slope_5d = 0.0
+
+            # RSI 底背離計算
             price_low_20 = low < prev_20['Low'].min()
             min_rsi_20 = prev_20['RSI14'].min()
-            rsi_bullish_div = price_low_20 and (rsi14 > min_rsi_20)
+            rsi_diff = rsi14 - min_rsi_20
+            rsi_bullish_div = price_low_20 and (rsi_diff > 0)
             is_bullish_candle = price > open_p
 
             if shares > 0:
                 if price > highest_price_since_entry:
                     highest_price_since_entry = price
-                # 記錄持股期間是否成功站上 MA20
                 if price >= ma20:
                     has_crossed_ma20 = True
 
@@ -338,7 +356,7 @@ class StrategyBacktester:
             if shares > 0:
                 unrealized_pct = ((price - avg_cost) / avg_cost) * 100.0
 
-                # 🛑 1. 8% 硬停損止血 (最高優先級，防止抄底失敗持續失血)
+                # 🛑 1. 8% 硬停損止血
                 if unrealized_pct <= -8.0:
                     sell_amount = shares * price
                     pnl = sell_amount - (shares * avg_cost)
@@ -352,6 +370,8 @@ class StrategyBacktester:
                     took_profit_15 = False
                     took_atr_profit = False
                     has_crossed_ma20 = False
+                    cooldown_counter = 5  # 觸發 5 天冷卻期
+                    last_trade_was_loss = True
                     sold_today = True
 
                     trades.append({
@@ -360,8 +380,7 @@ class StrategyBacktester:
                         "當下倉位": "0 股 (0.0%)", "剩餘現金": round(cash, 2)
                     })
 
-                # 🚨 2. MA20 生命線清倉
-                # 限制條件：必須【曾經站上過 MA20】或【曾觸發過鎖利/減碼】，以避開建倉期的邏輯衝突
+                # 🚨 2. MA20 生命線清倉 (避開草創期誤殺)
                 elif (has_crossed_ma20 or took_profit_15 or took_atr_profit) and price < ma20:
                     sell_amount = shares * price
                     pnl = sell_amount - (shares * avg_cost)
@@ -375,6 +394,8 @@ class StrategyBacktester:
                     took_profit_15 = False
                     took_atr_profit = False
                     has_crossed_ma20 = False
+                    cooldown_counter = 5  # 觸發 5 天冷卻期
+                    last_trade_was_loss = (pnl < 0)
                     sold_today = True
 
                     trades.append({
@@ -397,6 +418,8 @@ class StrategyBacktester:
                     took_profit_15 = False
                     took_atr_profit = False
                     has_crossed_ma20 = False
+                    cooldown_counter = 5  # 觸發 5 天冷卻期
+                    last_trade_was_loss = False
                     sold_today = True
 
                     trades.append({
@@ -405,7 +428,7 @@ class StrategyBacktester:
                         "當下倉位": "0 股 (0.0%)", "剩餘現金": round(cash, 2)
                     })
 
-                # 💰 4. 盈利超 15% 減碼 50% (實現零成本持倉)
+                # 💰 4. 盈利超 15% 減碼 50%
                 elif unrealized_pct >= 15.0 and not took_profit_15:
                     sell_shares = int(shares * 0.5)
                     if sell_shares > 0:
@@ -423,7 +446,7 @@ class StrategyBacktester:
                             "當下倉位": f"{shares:,} 股 ({pos_pct:.1f}%)", "剩餘現金": round(cash, 2)
                         })
 
-                # 🛡️ 5. 2.0x ATR 保險絲 (高點拉回防禦)
+                # 🛡️ 5. 2.0x ATR 保險絲
                 elif not took_atr_profit and highest_price_since_entry > 0 and (highest_price_since_entry - price) >= (2.0 * atr14):
                     sell_shares = int(shares * 0.5)
                     if sell_shares > 0:
@@ -452,12 +475,19 @@ class StrategyBacktester:
                 continue
 
             # ==========================================
-            # 2. 進場與加倉機制
+            # 2. 進場與加倉機制 (斜率過濾 + 冷卻期)
             # ==========================================
-            if temp <= 80.0:
-                # 第一步：🥶 極寒抄底 (20日新低 + RSI背離 + 綜合溫度<35°C + 陽線止跌)
+            if cooldown_counter == 0 and temp <= 80.0:
+                
+                # 📐 斜率過濾：當 MA20 5日內跌幅超過門檻（例如 -1.5%），視為急殺陡峭下彎
+                is_steep_downtrend = (ma20_slope_5d <= ma20_slope_threshold)
+
+                # 第一步：🥶 極寒抄底
                 if shares == 0:
-                    if rsi_bullish_div and temp < 35.0 and is_bullish_candle:
+                    strict_rsi_cond = (rsi_diff > 20.0 and price > ma5) if last_trade_was_loss else True
+
+                    # 🚫 當 MA20 下彎斜率過於陡峭時，強制禁止抄底
+                    if rsi_bullish_div and temp < 35.0 and is_bullish_candle and strict_rsi_cond and not is_steep_downtrend:
                         buy_budget = self.initial_capital * 0.15
                         buy_shares = int(buy_budget / price)
                         if buy_shares > 0 and cash >= buy_shares * price:
@@ -474,7 +504,7 @@ class StrategyBacktester:
                             curr_val = cash + (shares * price)
                             pos_pct = (shares * price / curr_val * 100) if curr_val > 0 else 0
                             trades.append({
-                                "Date": date, "日期": date_str, "動作": "建倉(15%)", "類別": "Buy", "原因": "🥶 極寒抄底 (20日背離+陽線)", 
+                                "Date": date, "日期": date_str, "動作": "建倉(15%)", "類別": "Buy", "原因": f"🥶 極寒抄底 (斜率{ma20_slope_5d:.1f}%正常)", 
                                 "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%", 
                                 "當下倉位": f"{shares:,} 股 ({pos_pct:.1f}%)", "剩餘現金": round(cash, 2)
                             })
@@ -482,7 +512,8 @@ class StrategyBacktester:
                 # 第二步：既有部位加碼
                 elif shares > 0 and cash >= (price * 100):
                     price_change_from_last = (price - last_add_price) / last_add_price
-                    # 階梯式加碼 (需站在 MA20 之上才允許跌 10% 順勢加碼，防止空頭逆勢攤平)
+                    
+                    # 階梯式加碼 (必須站上 MA20 才允許逢低加碼)
                     if (price_change_from_last <= -0.10 and price > ma20) or price_change_from_last >= 0.05:
                         add_budget = self.initial_capital * 0.10
                         add_shares = int(min(add_budget, cash) / price)
@@ -501,11 +532,7 @@ class StrategyBacktester:
                                 "當下倉位": f"{shares:,} 股 ({pos_pct:.1f}%)", "剩餘現金": round(cash, 2)
                             })
 
-                    # 🚀 黃金突破打滿條件防禦：
-                    # 1. 突破 MA10 (price > ma10 and yesterday_close <= yesterday_ma10)
-                    # 2. MA10 走平或向上 (ma10 >= yesterday_ma10) -> 避免空頭反彈
-                    # 3. 站上 MA20 生命線 (price >= ma20) -> 確保趨勢偏多
-                    # 4. 未破 10 日新低且 35°C <= T <= 80°C
+                    # 🚀 黃金突破打滿條件
                     breakout_ma10 = (price > ma10) and (yesterday_close <= yesterday_ma10)
                     ma10_turning_up = ma10 >= yesterday_ma10
                     above_life_line = price >= ma20
