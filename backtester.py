@@ -202,7 +202,7 @@ def cached_fetch_ohlc(symbol: str, start_date: str = None, end_date: str = None)
     return data_engine.fetch_ohlc(symbol, start_date, end_date)
 
 # ==========================================
-# 2. 技術指標與量價分析計算引擎
+# 2. 技術指標與動態溫控計算引擎
 # ==========================================
 class TechnicalAnalysisEngine:
     @staticmethod
@@ -220,44 +220,85 @@ class TechnicalAnalysisEngine:
         df['Vol_MA10'] = df['Volume'].rolling(10).mean()
         df['Vol_MA20'] = df['Volume'].rolling(20).mean()
 
-        # 當日量比（相對於前5日均量）、五日量比（5日均量對比前5日均量）、十日量比（10日均量對比前10日均量）
+        # 當日量比（相對於前5日均量）、五日量比、十日量比
         df['Daily_Vol_Ratio'] = df['Volume'] / df['Vol_MA5'].shift(1)
         df['Vol_Ratio_5D'] = df['Vol_MA5'] / df['Vol_MA5'].shift(5)
         df['Vol_Ratio_10D'] = df['Vol_MA10'] / df['Vol_MA10'].shift(10)
 
-        # RSI 計算
+        # RSI 計算與變化量
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
         rs = gain / loss
         df['RSI14'] = 100 - (100 / (1 + rs))
 
-        # 5日與20日看多/看空結構分析
-        # 5日看多：收盤 > MA5 且 MA5 向上；5日看空：收盤 < MA5 且 MA5 向下
+        df['RSI_Diff_2D'] = df['RSI14'].diff(2)
+        df['RSI_Diff_5D'] = df['RSI14'].diff(5)
+
+        # --- 溫度 T 計算邏輯 ---
+        # 1. 20日漲幅分位 (Score_Rank20)
+        df['Ret20'] = df['Close'].pct_change(20)
+        df['Score_Rank20'] = df['Ret20'].rolling(60).apply(
+            lambda x: (pd.Series(x).rank(pct=True).iloc[-1] * 100) if len(x) > 0 else 50, raw=False
+        )
+
+        # 2. 20日區間位置 (Score_Pos20)
+        df['High_20'] = df['High'].shift(1).rolling(20).max()
+        df['Low_20'] = df['Low'].shift(1).rolling(20).min()
+        range_20 = df['High_20'] - df['Low_20']
+        df['Score_Pos20'] = np.where(range_20 > 0, (df['Close'] - df['Low_20']) / range_20 * 100.0, 50.0)
+
+        # 3. 均線結構 (Score_MA)
+        ma_score = np.zeros(len(df))
+        ma_score += np.where(df['Close'] > df['MA5'], 25, 0)
+        ma_score += np.where(df['MA5'] > df['MA10'], 25, 0)
+        ma_score += np.where(df['MA10'] > df['MA20'], 25, 0)
+        ma_score += np.where(df['MA20'] > df['MA60'], 25, 0)
+        df['Score_MA'] = ma_score
+
+        # 4. RSI14 (Score_RSI)
+        df['Score_RSI'] = df['RSI14'].clip(0, 100)
+
+        # 5. MACD 權重分位 (Score_MACD)
+        ema12 = df['Close'].ewm(span=12, adjust=False).mean()
+        ema26 = df['Close'].ewm(span=26, adjust=False).mean()
+        df['DIF'] = ema12 - ema26
+        df['DEA'] = df['DIF'].ewm(span=9, adjust=False).mean()
+        df['MACD_Hist'] = (df['DIF'] - df['DEA']) * 2
+        df['Score_MACD'] = df['MACD_Hist'].rolling(60).apply(
+            lambda x: (pd.Series(x).rank(pct=True).iloc[-1] * 100) if len(x) > 0 else 50, raw=False
+        )
+
+        # 溫控總分算式
+        df['Temperature'] = (
+            0.24 * df['Score_Rank20'].fillna(50) +
+            0.22 * df['Score_Pos20'].fillna(50) +
+            0.22 * df['Score_MA'] +
+            0.18 * df['Score_RSI'].fillna(50) +
+            0.14 * df['Score_MACD'].fillna(50)
+        ).clip(0, 100)
+
+        # 5日與20日格局
         ma5_diff = df['MA5'].diff()
         df['Bull_5D'] = (df['Close'] > df['MA5']) & (ma5_diff > 0)
         df['Bear_5D'] = (df['Close'] < df['MA5']) & (ma5_diff < 0)
 
-        # 20日看多：收盤 > MA20 且 MA20 向上且 MA5 > MA20；20日看空：收盤 < MA20 且 MA20 向下且 MA5 < MA20
         ma20_diff = df['MA20'].diff()
         df['Bull_20D'] = (df['Close'] > df['MA20']) & (ma20_diff > 0) & (df['MA5'] > df['MA20'])
         df['Bear_20D'] = (df['Close'] < df['MA20']) & (ma20_diff < 0) & (df['MA5'] < df['MA20'])
 
-        # 均線金叉與趨勢反轉結構分析
-        # 短線金叉：當日或近期 MA5 向上穿過 MA10 / MA20
+        # 均線金叉與趨勢反轉結構
         df['GC_MA5_MA10'] = (df['MA5'] > df['MA10']) & (df['MA5'].shift(1) <= df['MA10'].shift(1))
         df['GC_MA5_MA20'] = (df['MA5'] > df['MA20']) & (df['MA5'].shift(1) <= df['MA20'].shift(1))
         df['GC_MA10_MA20'] = (df['MA10'] > df['MA20']) & (df['MA10'].shift(1) <= df['MA20'].shift(1))
 
-        # 5日內量價背離判定（頂背離：價格創新高但成交量/RSI縮減；底背離：價格創新低但成交量/RSI不創新低）
+        # 5日內量價背離
         price_5d_max = df['Close'].rolling(5).max()
         price_5d_min = df['Close'].rolling(5).min()
         vol_5d_max = df['Volume'].rolling(5).max()
         rsi_5d_min = df['RSI14'].rolling(5).min()
 
-        # 頂背離：當前價格創5日新高但成交量明顯低於近5日最大量
         df['Bear_Divergence_5D'] = (df['Close'] == price_5d_max) & (df['Volume'] < vol_5d_max * 0.8) & (df['Close'] > df['Close'].shift(1))
-        # 底背離：當前價格創5日新低但RSI未創新低且量能放大
         df['Bull_Divergence_5D'] = (df['Close'] == price_5d_min) & (df['RSI14'] > rsi_5d_min) & (df['Volume'] > df['Vol_MA5'])
 
         return df
@@ -327,7 +368,7 @@ def load_db():
 # ==========================================
 # 4. Streamlit GUI 主介面
 # ==========================================
-st.set_page_config(page_title="專業K線與量價結構分析工具", layout="wide", page_icon="📈")
+st.set_page_config(page_title="專業K線與動態溫控分析工具", layout="wide", page_icon="📈")
 
 if "db" not in st.session_state:
     st.session_state.db = load_db()
@@ -397,7 +438,7 @@ if db.get("stocks"):
         st.sidebar.success(f"已刪除 {del_sym}")
         st.rerun()
 
-st.title("📈 K 線與量價趨勢結構工具")
+st.title("📈 K 線、動態溫控與 RSI 趨勢結構工具")
 
 col_bt1, col_bt2, col_bt3 = st.columns([2, 2, 2])
 with col_bt1:
@@ -416,7 +457,7 @@ with col_bt3:
     default_end = datetime.strptime(default_end_str, "%Y-%m-%d")
     bt_end = st.date_input("結束日期", value=default_end)
 
-if st.button("🚀 載入K線與量價結構分析", type="primary"):
+if st.button("🚀 載入K線與溫控結構分析", type="primary"):
     start_str = bt_start.strftime("%Y-%m-%d")
     end_str = bt_end.strftime("%Y-%m-%d")
     
@@ -425,9 +466,9 @@ if st.button("🚀 載入K線與量價結構分析", type="primary"):
     db["bt_end"] = end_str
     save_db(db)
 
-    with st.spinner(f"正在擷取 {bt_symbol} 行情數據與計算量價指標..."):
+    with st.spinner(f"正在擷取 {bt_symbol} 行情數據與計算動態溫控..."):
         try:
-            fetch_start = (bt_start - timedelta(days=90)).strftime("%Y-%m-%d")
+            fetch_start = (bt_start - timedelta(days=120)).strftime("%Y-%m-%d")
             df_raw, src_bt = cached_fetch_ohlc(bt_symbol, start_date=fetch_start, end_date=end_str)
             
             if df_raw.empty or len(df_raw) < 10:
@@ -442,66 +483,68 @@ if st.button("🚀 載入K線與量價結構分析", type="primary"):
                     latest = df_sub.iloc[-1]
                     
                     st.markdown("---")
-                    st.markdown("#### 📊 最新量比與趨勢結構數據總覽")
+                    st.markdown("#### 📊 最新市場溫度與 RSI 變動總覽")
                     
                     m1, m2, m3, m4, m5 = st.columns(5)
                     
-                    # 1. 當日量比
+                    # 1. 動態溫度 T
+                    temp_val = latest['Temperature']
+                    if temp_val < 35.0:
+                        temp_tag = "🥶 低溫抄底區"
+                    elif temp_val > 80.0:
+                        temp_tag = "🔥 高溫警戒區"
+                    else:
+                        temp_tag = "🟡 溫和區域"
+                    m1.metric("市場動態溫度 T", f"{temp_val:.1f}°C", temp_tag)
+
+                    # 2. RSI(14) 近2日與5日變化
+                    rsi_now = latest['RSI14']
+                    rsi_diff_2 = latest['RSI_Diff_2D']
+                    rsi_diff_5 = latest['RSI_Diff_5D']
+                    
+                    diff_2_str = f"{'▲' if rsi_diff_2 >= 0 else '▼'} {abs(rsi_diff_2):.2f}" if not np.isnan(rsi_diff_2) else "N/A"
+                    diff_5_str = f"{'▲' if rsi_diff_5 >= 0 else '▼'} {abs(rsi_diff_5):.2f}" if not np.isnan(rsi_diff_5) else "N/A"
+                    
+                    m2.metric("RSI(14) 當前值", f"{rsi_now:.2f}", f"2日: {diff_2_str} | 5日: {diff_5_str}")
+
+                    # 3. 量比情況
                     d_vr = latest['Daily_Vol_Ratio']
-                    m1.metric("當日量比 (對比5日均量)", f"{d_vr:.2f}" if not np.isnan(d_vr) else "N/A", 
+                    m3.metric("當日量比 / 5日量比", f"{d_vr:.2f} / {latest['Vol_Ratio_5D']:.2f}" if not np.isnan(d_vr) else "N/A", 
                               delta="放量" if d_vr >= 1.2 else ("縮量" if d_vr <= 0.8 else "持平"))
 
-                    # 2. 5日量比 & 10日量比
-                    vr_5d = latest['Vol_Ratio_5D']
-                    vr_10d = latest['Vol_Ratio_10D']
-                    m2.metric("5日量比 / 10日量比", f"{vr_5d:.2f} / {vr_10d:.2f}" if not np.isnan(vr_5d) else "N/A")
-
-                    # 3. 5日內量價背離監控
+                    # 4. 5日內量價背離與金叉監控
                     recent_5d = df_sub.iloc[-5:]
                     has_bear_div = recent_5d['Bear_Divergence_5D'].any()
                     has_bull_div = recent_5d['Bull_Divergence_5D'].any()
+                    has_gc_5_20 = recent_5d['GC_MA5_MA20'].any()
                     
-                    if has_bear_div and has_bull_div:
-                        div_status = "⚠️ 頂背離與底背離交替"
-                    elif has_bear_div:
+                    if has_bear_div:
                         div_status = "🚨 5日出現頂背離 (價高量縮)"
                     elif has_bull_div:
                         div_status = "🟢 5日出現底背離 (價低量增)"
+                    elif has_gc_5_20:
+                        div_status = "🚀 5日出現 MA5 上穿 MA20 金叉"
                     else:
-                        div_status = "無明顯量價背離"
-                    m3.metric("5日內量價背離狀態", div_status)
+                        div_status = "結構正常"
+                    m4.metric("5日內量價/金叉結構", div_status)
 
-                    # 4. 均線金叉結構
-                    has_gc_5_10 = recent_5d['GC_MA5_MA10'].any()
-                    has_gc_5_20 = recent_5d['GC_MA5_MA20'].any()
-                    has_gc_10_20 = recent_5d['GC_MA10_MA20'].any()
-                    
-                    if has_gc_5_20 or has_gc_10_20:
-                        gc_status = "🚀 均線金叉 (強趨勢反轉預測)"
-                    elif has_gc_5_10:
-                        gc_status = "📈 MA5上穿MA10 (短線金叉)"
-                    else:
-                        gc_status = "無新金叉結構"
-                    m4.metric("均線金叉反轉結構", gc_status)
-
-                    # 5. 5日與20日看多/看空格局
+                    # 5. 5日與20日格局
                     b5 = "看多 🟢" if latest['Bull_5D'] else ("看空 🔴" if latest['Bear_5D'] else "震盪 🟡")
                     b20 = "看多 🟢" if latest['Bull_20D'] else ("看空 🔴" if latest['Bear_20D'] else "震盪 🟡")
                     m5.metric("5日 / 20日格局", f"5日:{b5} | 20日:{b20}")
 
                     st.markdown("---")
-                    st.markdown("#### 🎯 K線與成交量技術分析主圖")
+                    st.markdown("#### 🎯 K線、市場溫度與 RSI 指標對照圖")
 
-                    # 繪製主副圖 (Row 1: K線+MA, Row 2: 成交量)
                     fig = make_subplots(
-                        rows=2, cols=1, 
+                        rows=3, cols=1, 
                         shared_xaxes=True, 
-                        vertical_spacing=0.05, 
-                        row_heights=[0.7, 0.3],
-                        subplot_titles=(f"{bt_symbol} K線與均線結構", "成交量與5日/10日均量線")
+                        vertical_spacing=0.04, 
+                        row_heights=[0.5, 0.25, 0.25],
+                        subplot_titles=(f"{bt_symbol} K線與均線結構", "動態市場溫度 T (0-100)", "RSI(14) 及其動能走勢")
                     )
 
-                    # K線圖
+                    # Row 1: K線圖
                     fig.add_trace(go.Candlestick(
                         x=df_sub.index,
                         open=df_sub['Open'], high=df_sub['High'],
@@ -510,70 +553,44 @@ if st.button("🚀 載入K線與量價結構分析", type="primary"):
                         increasing_line_color='#26a69a', decreasing_line_color='#ef5350'
                     ), row=1, col=1)
 
-                    # 均線
                     fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['MA5'], mode='lines', name='MA5', line=dict(color='#FF9800', width=1.2)), row=1, col=1)
                     fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['MA10'], mode='lines', name='MA10', line=dict(color='#2196F3', width=1.2)), row=1, col=1)
                     fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['MA20'], mode='lines', name='MA20', line=dict(color='#9C27B0', width=1.5)), row=1, col=1)
                     fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['MA60'], mode='lines', name='MA60', line=dict(color='#607D8B', width=1.5)), row=1, col=1)
 
-                    # 金叉標註點
-                    gc_points = df_sub[df_sub['GC_MA5_MA20'] | df_sub['GC_MA5_MA10']]
-                    if not gc_points.empty:
-                        fig.add_trace(go.Scatter(
-                            x=gc_points.index,
-                            y=gc_points['Low'] * 0.98,
-                            mode='markers+text',
-                            name='均線金叉點',
-                            marker=dict(symbol='triangle-up', size=11, color='#00E676'),
-                            text=['金叉' for _ in range(len(gc_points))],
-                            textposition='bottom center'
-                        ), row=1, col=1)
+                    # Row 2: 動態市場溫度 T
+                    fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Temperature'], mode='lines', name='溫度 T', line=dict(color='#FF3D00', width=2)), row=2, col=1)
+                    fig.add_hline(y=80, line_dash="dash", line_color="#FF1744", annotation_text="高溫警示 (80°C)", row=2, col=1)
+                    fig.add_hline(y=35, line_dash="dash", line_color="#00E676", annotation_text="低溫抄底 (35°C)", row=2, col=1)
 
-                    # 背離標註點
-                    div_points = df_sub[df_sub['Bear_Divergence_5D'] | df_sub['Bull_Divergence_5D']]
-                    if not div_points.empty:
-                        fig.add_trace(go.Scatter(
-                            x=div_points.index,
-                            y=div_points['High'] * 1.02,
-                            mode='markers+text',
-                            name='量價背離訊號',
-                            marker=dict(symbol='diamond', size=10, color='#FFD600'),
-                            text=['背離' for _ in range(len(div_points))],
-                            textposition='top center'
-                        ), row=1, col=1)
-
-                    # 成交量柱狀圖
-                    colors = ['#26a69a' if c >= o else '#ef5350' for c, o in zip(df_sub['Close'], df_sub['Open'])]
-                    fig.add_trace(go.Bar(
-                        x=df_sub.index, y=df_sub['Volume'],
-                        name='成交量', marker_color=colors
-                    ), row=2, col=1)
-
-                    fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Vol_MA5'], mode='lines', name='5日均量', line=dict(color='#FF9800', width=1)), row=2, col=1)
-                    fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Vol_MA10'], mode='lines', name='10日均量', line=dict(color='#2196F3', width=1)), row=2, col=1)
+                    # Row 3: RSI(14)
+                    fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['RSI14'], mode='lines', name='RSI(14)', line=dict(color='#00E5FF', width=1.5)), row=3, col=1)
+                    fig.add_hline(y=70, line_dash="dot", line_color="#FF8A80", row=3, col=1)
+                    fig.add_hline(y=30, line_dash="dot", line_color="#B9F6CA", row=3, col=1)
 
                     fig.update_layout(
                         xaxis_rangeslider_visible=False,
                         hovermode="x unified",
                         template="plotly_white",
-                        height=650
+                        height=750
                     )
                     st.plotly_chart(fig, use_container_width=True)
 
                     st.markdown("---")
-                    st.markdown("#### 📜 每日技術指標與量比數據明細表")
+                    st.markdown("#### 📜 每日技術指標、市場溫度與 RSI 變動明細")
                     
                     show_df = df_sub.copy()
+                    show_df['市場溫度 T'] = show_df['Temperature'].round(1)
+                    show_df['RSI(14)'] = show_df['RSI14'].round(2)
+                    
+                    show_df['RSI 2日變化'] = show_df['RSI_Diff_2D'].apply(lambda x: f"{'▲' if x>=0 else '▼'}{abs(x):.2f}" if not np.isnan(x) else "-")
+                    show_df['RSI 5日變化'] = show_df['RSI_Diff_5D'].apply(lambda x: f"{'▲' if x>=0 else '▼'}{abs(x):.2f}" if not np.isnan(x) else "-")
+                    
                     show_df['當日量比'] = show_df['Daily_Vol_Ratio'].round(2)
-                    show_df['5日量比'] = show_df['Vol_Ratio_5D'].round(2)
-                    show_df['10日量比'] = show_df['Vol_Ratio_10D'].round(2)
                     show_df['5日格局'] = np.where(show_df['Bull_5D'], '看多 🟢', np.where(show_df['Bear_5D'], '看空 🔴', '震盪 🟡'))
                     show_df['20日格局'] = np.where(show_df['Bull_20D'], '看多 🟢', np.where(show_df['Bear_20D'], '看空 🔴', '震盪 🟡'))
-                    
-                    show_df['背離標記'] = np.where(show_df['Bear_Divergence_5D'], '頂背離 🚨', np.where(show_df['Bull_Divergence_5D'], '底背離 🟢', '-'))
-                    show_df['金叉結構'] = np.where(show_df['GC_MA5_MA20'], 'MA5跨MA20 🚀', np.where(show_df['GC_MA5_MA10'], 'MA5跨MA10 📈', '-'))
 
-                    show_cols = ["Open", "High", "Low", "Close", "Volume", "當日量比", "5日量比", "10日量比", "5日格局", "20日格局", "背離標記", "金叉結構"]
+                    show_cols = ["Open", "High", "Low", "Close", "Volume", "市場溫度 T", "RSI(14)", "RSI 2日變化", "RSI 5日變化", "當日量比", "5日格局", "20日格局"]
                     
                     display_df = show_df[show_cols].sort_index(ascending=False)
                     st.dataframe(display_df, use_container_width=True)
