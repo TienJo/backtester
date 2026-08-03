@@ -265,7 +265,7 @@ class TradingStrategyEngine:
         return df
 
 # ==========================================
-# 3. 歷史回測引擎 (精準右側進場與嚴格左側防禦)
+# 3. 歷史回測引擎 (右側高效重倉與快加碼優化版)
 # ==========================================
 class StrategyBacktester:
     def __init__(self, df: pd.DataFrame, initial_capital: float = 200000.0, start_date: str = None, end_date: str = None):
@@ -324,18 +324,15 @@ class StrategyBacktester:
             if cooldown_counter > 0:
                 cooldown_counter -= 1
 
-            # 斜率與趨勢狀態判定
             if i >= 25:
                 ma20_5d_ago = float(df.iloc[i-5]['MA20'])
                 ma20_slope_5d = ((ma20 - ma20_5d_ago) / ma20_5d_ago) * 100.0 if ma20_5d_ago > 0 else 0.0
             else:
                 ma20_slope_5d = 0.0
 
-            # 🛑 雙重空頭防守條件：1. 斜率陡峭下滑  2. 價格低於 MA20 且 MA20 低於 MA60 (中期空頭)
             is_downtrend_structure = (price < ma20 and ma20 < ma60)
             is_steep_downtrend = (ma20_slope_5d <= -1.0) or is_downtrend_structure
 
-            # RSI 背離計算
             price_low_20 = low < prev_20['Low'].min()
             min_rsi_20 = prev_20['RSI14'].min()
             rsi_diff = rsi14 - min_rsi_20
@@ -379,8 +376,8 @@ class StrategyBacktester:
                         "當下倉位": "0 股 (0.0%)", "剩餘現金": round(cash, 2)
                     })
 
-                # 🚨 2. MA20 生命線清倉
-                elif (has_crossed_ma20 or took_profit_15 or took_atr_profit) and price < ma20:
+                # 🚨 2. MA20 生命線清倉 (需收盤價確認跌破)
+                elif (has_crossed_ma20 or took_profit_15 or took_atr_profit) and price < ma20 and price < open_p:
                     sell_amount = shares * price
                     pnl = sell_amount - (shares * avg_cost)
                     cash += sell_amount
@@ -474,17 +471,17 @@ class StrategyBacktester:
                 continue
 
             # ==========================================
-            # 2. 進場與加碼機制
+            # 2. 進場與加碼機制 (重倉進場 + 快速加碼)
             # ==========================================
             if cooldown_counter == 0 and temp <= 85.0:
                 
-                # 開倉邏輯 (未持股)
+                # 開倉邏輯
                 if shares == 0:
                     strict_rsi_cond = (rsi_diff > 15.0 and price > ma5) if last_trade_was_loss else True
 
-                    # 🥶 方式 A：左側抄底 (需同時滿足：非空頭結構 + 無陡峭下彎)
+                    # 🥶 方式 A：左側抄底 (輕倉 20%)
                     if rsi_bullish_div and temp < 35.0 and is_bullish_candle and strict_rsi_cond and not is_steep_downtrend:
-                        buy_budget = self.initial_capital * 0.15
+                        buy_budget = self.initial_capital * 0.20
                         buy_shares = int(buy_budget / price)
                         if buy_shares > 0 and cash >= buy_shares * price:
                             cost = buy_shares * price
@@ -500,15 +497,14 @@ class StrategyBacktester:
                             curr_val = cash + (shares * price)
                             pos_pct = (shares * price / curr_val * 100) if curr_val > 0 else 0
                             trades.append({
-                                "Date": date, "日期": date_str, "動作": "建倉(15%)", "類別": "Buy", "原因": "🥶 極寒抄底 (結構正常)", 
+                                "Date": date, "日期": date_str, "動作": "建倉(20%)", "類別": "Buy", "原因": "🥶 極寒抄底 (結構正常)", 
                                 "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%", 
                                 "當下倉位": f"{shares:,} 股 ({pos_pct:.1f}%)", "剩餘現金": round(cash, 2)
                             })
 
-                    # 📈 方式 B：右側右肩強勢突破建倉 (專抓 V 轉主升段)
-                    # 條件：站上 MA20 + MA5 > MA10 > MA20 多頭排列 + 陽線突破
-                    elif price > ma20 and (ma5 > ma10 > ma20) and is_bullish_candle:
-                        buy_budget = self.initial_capital * 0.20
+                    # 📈 方式 B：右側強勢突破 (直上 50% 重倉，不浪費起漲點)
+                    elif price > ma20 and (ma5 > ma10) and is_bullish_candle:
+                        buy_budget = self.initial_capital * 0.50
                         buy_shares = int(buy_budget / price)
                         if buy_shares > 0 and cash >= buy_shares * price:
                             cost = buy_shares * price
@@ -524,40 +520,17 @@ class StrategyBacktester:
                             curr_val = cash + (shares * price)
                             pos_pct = (shares * price / curr_val * 100) if curr_val > 0 else 0
                             trades.append({
-                                "Date": date, "日期": date_str, "動作": "建倉(20%)", "類別": "Buy", "原因": "📈 右側多頭強勢突破 (MA全排)", 
+                                "Date": date, "日期": date_str, "動作": "建倉(50%)", "類別": "Buy", "原因": "🚀 右側強勢突破重倉 (站上MA20+MA5>MA10)", 
                                 "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%", 
                                 "當下倉位": f"{shares:,} 股 ({pos_pct:.1f}%)", "剩餘現金": round(cash, 2)
                             })
 
-                # 加碼邏輯 (已持股)
+                # 加碼邏輯 (已持股時快加碼)
                 elif shares > 0 and cash >= (price * 100):
                     price_change_from_last = (price - last_add_price) / last_add_price
                     
-                    if (price_change_from_last <= -0.08 and price > ma20) or price_change_from_last >= 0.05:
-                        add_budget = self.initial_capital * 0.10
-                        add_shares = int(min(add_budget, cash) / price)
-                        if add_shares > 0:
-                            total_cost = (shares * avg_cost) + (add_shares * price)
-                            shares += add_shares
-                            avg_cost = total_cost / shares
-                            cash -= (add_shares * price)
-                            last_add_price = price
-
-                            curr_val = cash + (shares * price)
-                            pos_pct = (shares * price / curr_val * 100) if curr_val > 0 else 0
-                            trades.append({
-                                "Date": date, "日期": date_str, "動作": "加碼1層", "類別": "Buy", "原因": f"📈 動態加碼 ({price_change_from_last:+.1f}%)", 
-                                "成交價": price, "股數": add_shares, "損益": 0.0, "報酬率": "0.00%", 
-                                "當下倉位": f"{shares:,} 股 ({pos_pct:.1f}%)", "剩餘現金": round(cash, 2)
-                            })
-
-                    # 🚀 黃金突破打滿
-                    breakout_ma10 = (price > ma10) and (yesterday_close <= yesterday_ma10)
-                    ma10_turning_up = ma10 >= yesterday_ma10
-                    above_life_line = price >= ma20
-                    not_new_low = low >= prev_10['Low'].min()
-                    
-                    if breakout_ma10 and ma10_turning_up and above_life_line and not_new_low and (35.0 <= temp <= 80.0):
+                    # 🚀 右側快速打滿：建倉後只要獲利突破 3% 且站穩 MA5，直接把剩餘資金打滿
+                    if price_change_from_last >= 0.03 and price > ma5:
                         add_shares = int(cash / price)
                         if add_shares > 0:
                             total_cost = (shares * avg_cost) + (add_shares * price)
@@ -569,7 +542,7 @@ class StrategyBacktester:
                             curr_val = cash + (shares * price)
                             pos_pct = (shares * price / curr_val * 100) if curr_val > 0 else 0
                             trades.append({
-                                "Date": date, "日期": date_str, "動作": "黃金突破打滿", "類別": "Buy", "原因": "🚀 黃金突破打滿 (MA10翻揚+站上MA20)", 
+                                "Date": date, "日期": date_str, "動作": "快速打滿100%", "類別": "Buy", "原因": f"🚀 趨勢確立加碼打滿 ({price_change_from_last:+.1f}%)", 
                                 "成交價": price, "股數": add_shares, "損益": 0.0, "報酬率": "0.00%", 
                                 "當下倉位": f"{shares:,} 股 ({pos_pct:.1f}%)", "剩餘現金": round(cash, 2)
                             })
@@ -586,7 +559,6 @@ class StrategyBacktester:
         df_trades = pd.DataFrame(trades)
         
         return df_equity, df_trades, df
-
 # ==========================================
 # 4. 本地 JSON 數據庫管理者
 # ==========================================
