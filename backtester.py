@@ -271,7 +271,7 @@ class TradingStrategyEngine:
         return df
 
 # ==========================================
-# 3. 歷史回測引擎 (含「停損後二次探底：RSI背離>20且低點>MA5」機制)
+# 3. 歷史回測引擎
 # ==========================================
 class StrategyBacktester:
     def __init__(self, df: pd.DataFrame, initial_capital: float = 200000.0, start_date: str = None, end_date: str = None):
@@ -289,9 +289,7 @@ class StrategyBacktester:
         shares = 0
         avg_cost = 0.0
         took_profit = False
-        
-        # --- 停損離場狀態標記 ---
-        has_stopped_out = False  # 標記是否經歷過停損出場
+        has_stopped_out = False
         
         trades = []
         equity_curve = []
@@ -305,18 +303,18 @@ class StrategyBacktester:
             today = df.iloc[i]
             yesterday = df.iloc[i-1]
             prev_10 = df.iloc[i-10:i]
+            prev_3 = df.iloc[i-3:i]
             
             price = float(today['Close'])
-            high = float(today['High'])
+            open_price = float(today['Open'])
             low = float(today['Low'])
             volume = float(today['Volume'])
             
             ma5 = float(today['MA5']) if not np.isnan(today['MA5']) else price
             ma20 = float(today['MA20']) if not np.isnan(today['MA20']) else price
-            ma60 = float(today['MA60']) if not np.isnan(today['MA60']) else price
             rsi14 = float(today['RSI14']) if not np.isnan(today['RSI14']) else 50.0
             temp = float(today['Temperature']) if not np.isnan(today['Temperature']) else 50.0
-            high_20 = float(today['High_20']) if not np.isnan(today['High_20']) else high
+            high_20 = float(today['High_20']) if not np.isnan(today['High_20']) else price
             ma10_vol_prev = float(yesterday['MA10_Vol']) if not np.isnan(yesterday['MA10_Vol']) else volume
             yesterday_low = float(yesterday['Low'])
             
@@ -324,16 +322,19 @@ class StrategyBacktester:
             breakout_20_high = (price > high_20) and (vol_ratio >= 1.2)
             bullish_trend = price > ma20 and ma5 > ma20
 
-            # --- 計算 RSI 底背離幅度 ---
-            price_low_10 = low < prev_10['Low'].min()
+            # RSI 背離計算 (近 3 天內曾創新低 + 今日陽線 + 站上 MA5)
+            made_new_low_recently = (prev_3['Low'].min() < prev_10['Low'].min()) or (low < prev_10['Low'].min())
             min_rsi_10 = prev_10['RSI14'].min()
             rsi_diff = rsi14 - min_rsi_10
             
-            # 標準 RSI 底背離
-            rsi_bullish_div = price_low_10 and (rsi14 > min_rsi_10) and (rsi14 < 45)
+            # 陽線且站上 MA5 的止跌訊號
+            is_rebound_candle = (price > open_price) and (price > ma5)
             
-            # **二次探底限定強條件：低點創近10日新低 + RSI背離幅度 > 20點 + 當日最低價 > MA5**
-            second_bottom_signal = price_low_10 and (rsi_diff > 20.0) and (low > ma5)
+            # 1. 新修訂的極寒抄底：近 3 天內曾創 10 日新低 + 今日陽線站上 MA5 + T < 35度 + RSI < 45
+            first_bottom_signal = made_new_low_recently and is_rebound_candle and (temp < 35.0) and (rsi14 < 45.0)
+            
+            # 2. 停損後的二次探底條件：RSI背離 > 20點 + 最低價 > MA5
+            second_bottom_signal = made_new_low_recently and (rsi_diff > 20.0) and (low > ma5)
 
             # 1. 出場與減倉機制
             sold_today = False
@@ -355,7 +356,7 @@ class StrategyBacktester:
                             "成交價": price, "股數": sell_shares, "損益": pnl, "報酬率": f"{unrealized_pct:+.2f}%", "剩餘現金": cash
                         })
 
-                # B. 沸點逃頂 (全賣)
+                # B. 沸點逃頂
                 if temp > 95.0 and (price < yesterday_low or price < ma5):
                     sell_amount = shares * price
                     pnl = sell_amount - (shares * avg_cost)
@@ -369,9 +370,9 @@ class StrategyBacktester:
                     avg_cost = 0.0
                     took_profit = False
                     sold_today = True
-                    has_stopped_out = False  # 獲利逃頂不觸發停損鎖定機制
+                    has_stopped_out = False
                     
-                # C. 8% 絕對停損 (觸發停損標記)
+                # C. 8% 絕對停損
                 elif price <= hard_stop_price:
                     sell_amount = shares * price
                     pnl = sell_amount - (shares * avg_cost)
@@ -385,9 +386,9 @@ class StrategyBacktester:
                     avg_cost = 0.0
                     took_profit = False
                     sold_today = True
-                    has_stopped_out = True  # 啟動二次探底防守鎖定！
+                    has_stopped_out = True
                     
-                # D. 建倉失敗停損 (跌破 MA20 * 0.97，觸發停損標記)
+                # D. 建倉失敗停損 (跌破 MA20 * 0.97)
                 elif price < ma20 * 0.97:
                     sell_amount = shares * price
                     pnl = sell_amount - (shares * avg_cost)
@@ -401,7 +402,7 @@ class StrategyBacktester:
                     avg_cost = 0.0
                     took_profit = False
                     sold_today = True
-                    has_stopped_out = True  # 啟動二次探底防守鎖定！
+                    has_stopped_out = True
 
             if sold_today:
                 current_portfolio_value = cash
@@ -415,9 +416,7 @@ class StrategyBacktester:
 
             # 2. 建倉與加倉機制
             if shares == 0:
-                # ----------------------------------------------------
-                # 情境 A：曾停損離場，必須滿足「二次探底：RSI背離>20且最低價>MA5」才建倉
-                # ----------------------------------------------------
+                # 情境 A：曾停損離場，需滿足「二次探底：RSI背離>20且低點>MA5」
                 if has_stopped_out:
                     if second_bottom_signal:
                         buy_budget = self.initial_capital * 0.4
@@ -428,20 +427,15 @@ class StrategyBacktester:
                             shares = buy_shares
                             avg_cost = price
                             took_profit = False
-                            has_stopped_out = False  # 二次探底建倉成功，解鎖狀態！
+                            has_stopped_out = False
                             trades.append({
                                 "日期": date_str, "動作": "建倉(40%)", "原因": f"🎯 二次探底建倉 (RSI背離達+{rsi_diff:.1f}點且低點>MA5)", 
                                 "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%", "剩餘現金": cash
                             })
-                    else:
-                        # 尚未符合二次探底的嚴格條件，持續空倉觀望
-                        pass
 
-                # ----------------------------------------------------
-                # 情境 B：初始或正常狀態建倉
-                # ----------------------------------------------------
+                # 情境 B：初始或正常建倉
                 else:
-                    if rsi_bullish_div and temp < 35.0:
+                    if first_bottom_signal:
                         buy_budget = self.initial_capital * 0.4
                         buy_shares = int(buy_budget / price)
                         if buy_shares > 0 and cash >= buy_shares * price:
@@ -451,7 +445,7 @@ class StrategyBacktester:
                             avg_cost = price
                             took_profit = False
                             trades.append({
-                                "日期": date_str, "動作": "建倉(40%)", "原因": "🎯 極寒抄底", 
+                                "日期": date_str, "動作": "建倉(40%)", "原因": "🎯 極寒抄底 (T < 35度 + 近3日創新低後陽線站上MA5)", 
                                 "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%", "剩餘現金": cash
                             })
                     elif breakout_20_high and 35.0 <= temp <= 80.0:
@@ -507,14 +501,14 @@ def save_db(db):
 
 def load_db():
     default_db = {
-        "stock_order": ["2330.TW", "561160"],
+        "stock_order": ["2330.TW", "513380"],
         "stocks": {
             "2330.TW": {
                 "symbol": "2330.TW", "name": "台積電",
                 "target_capital": 200000.0
             },
-            "561160": {
-                "symbol": "561160", "name": "富國電池ETF",
+            "513380": {
+                "symbol": "513380", "name": "恒生科技ETF廣發",
                 "target_capital": 200000.0
             }
         }
@@ -604,7 +598,7 @@ if hasattr(st, "dialog"):
 st.sidebar.markdown("---")
 
 with st.sidebar.expander("➕ 新增標的", expanded=False):
-    new_sym = st.text_input("代碼 (台股 2330.TW / ETF 561160 / 基金 013396)", "").strip().upper()
+    new_sym = st.text_input("代碼 (台股 2330.TW / ETF 513380 / 基金 013396)", "").strip().upper()
     new_name = st.text_input("標的名稱 (選填，若空白將自動使用代碼)", "").strip()
     new_cap = st.number_input("獨立資本上限 (元)", min_value=10000.0, max_value=100000000.0, value=200000.0, step=50000.0)
     
@@ -642,7 +636,6 @@ if db.get("stocks"):
 
 # ----------------- 主介面：歷史區間回測 -----------------
 st.title("📜 個股歷史策略模擬與回測系統")
-st.caption("二次探底條件已更新：停損後建倉需滿足【RSI底背離 > 20點 + 當日最低價 > MA5】。")
 
 col_bt1, col_bt2, col_bt3 = st.columns([2, 2, 2])
 with col_bt1:
