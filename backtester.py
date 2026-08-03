@@ -202,7 +202,7 @@ def cached_fetch_ohlc(symbol: str, start_date: str = None, end_date: str = None)
     return data_engine.fetch_ohlc(symbol, start_date, end_date)
 
 # ==========================================
-# 2. 技術指標與動態溫控邏輯
+# 2. 技術指標邏輯
 # ==========================================
 class TradingStrategyEngine:
     @staticmethod
@@ -211,13 +211,6 @@ class TradingStrategyEngine:
         df['MA5'] = df['Close'].rolling(5).mean()
         df['MA10'] = df['Close'].rolling(10).mean()
         df['MA20'] = df['Close'].rolling(20).mean()
-        df['MA60'] = df['Close'].rolling(60).mean()
-
-        df['TR0'] = df['High'] - df['Low']
-        df['TR1'] = (df['High'] - df['Close'].shift(1)).abs()
-        df['TR2'] = (df['Low'] - df['Close'].shift(1)).abs()
-        df['TR'] = df[['TR0', 'TR1', 'TR2']].max(axis=1)
-        df['ATR14'] = df['TR'].ewm(alpha=1/14, adjust=False).mean()
 
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(14).mean()
@@ -225,48 +218,19 @@ class TradingStrategyEngine:
         rs = gain / loss
         df['RSI14'] = 100 - (100 / (1 + rs))
 
-        df['High_20'] = df['High'].shift(1).rolling(20).max()
-        df['Low_20'] = df['Low'].shift(1).rolling(20).min()
-
-        ema12 = df['Close'].ewm(span=12, adjust=False).mean()
-        ema26 = df['Close'].ewm(span=26, adjust=False).mean()
-        df['DIF'] = ema12 - ema26
-        df['DEA'] = df['DIF'].ewm(span=9, adjust=False).mean()
-        df['MACD_Hist'] = (df['DIF'] - df['DEA']) * 2
-
-        df['Ret20'] = df['Close'].pct_change(20)
-        df['Score_Rank20'] = df['Ret20'].rolling(60).apply(
-            lambda x: (pd.Series(x).rank(pct=True).iloc[-1] * 100) if len(x) > 0 else 50, raw=False
-        )
-
-        range_20 = df['High_20'] - df['Low_20']
-        df['Score_Pos20'] = np.where(range_20 > 0, (df['Close'] - df['Low_20']) / range_20 * 100.0, 50.0)
-
-        ma_score = np.zeros(len(df))
-        ma_score += np.where(df['Close'] > df['MA5'], 25, 0)
-        ma_score += np.where(df['MA5'] > df['MA10'], 25, 0)
-        ma_score += np.where(df['MA10'] > df['MA20'], 25, 0)
-        ma_score += np.where(df['MA20'] > df['MA60'], 25, 0)
-        df['Score_MA'] = ma_score
-
-        df['Score_RSI'] = df['RSI14'].clip(0, 100)
-
-        df['Score_MACD'] = df['MACD_Hist'].rolling(60).apply(
-            lambda x: (pd.Series(x).rank(pct=True).iloc[-1] * 100) if len(x) > 0 else 50, raw=False
-        )
-
-        df['Temperature'] = (
-            0.24 * df['Score_Rank20'].fillna(50) +
-            0.22 * df['Score_Pos20'].fillna(50) +
-            0.22 * df['Score_MA'] +
-            0.18 * df['Score_RSI'].fillna(50) +
-            0.14 * df['Score_MACD'].fillna(50)
-        ).clip(0, 100)
+        # 進場條件所需之最低點計算
+        df['Vol_Min_5'] = df['Volume'].rolling(5).min()
+        df['RSI_Min_5'] = df['RSI14'].rolling(5).min()
+        
+        # 判斷縮量跡象用
+        df['Vol_MA3'] = df['Volume'].rolling(3).mean()
+        df['Vol_MA5'] = df['Volume'].rolling(5).mean()
+        df['Vol_MA10'] = df['Volume'].rolling(10).mean()
 
         return df
 
 # ==========================================
-# 3. 歷史回測引擎 (精準右側進場與嚴格左側防護版)
+# 3. 歷史回測引擎 (新策略邏輯)
 # ==========================================
 class StrategyBacktester:
     def __init__(self, df: pd.DataFrame, initial_capital: float = 200000.0, start_date: str = None, end_date: str = None):
@@ -278,170 +242,65 @@ class StrategyBacktester:
             
         self.initial_capital = initial_capital
 
-    # ------------------------------------------------------------------
-    # 交易成本設定（可依標的類型調整：股票賣出證交稅0.3%，ETF通常0.1%）
-    # ------------------------------------------------------------------
-    BUY_FEE_RATE = 0.001425
-    SELL_FEE_RATE = 0.001425
-    SELL_TAX_RATE = 0.001   # 預設用 ETF 稅率，個股請改 0.003
-
-    STOP_LOSS_PCT = -8.0     # 硬停損（風控底線，不因行情不同而調整）
-    COOLDOWN_BARS = 5
-    ADD_ON_STEP_PCT = 0.03   # 每上漲 3% 觸發下一批加碼
-    ADD_ON_FRACTION = 0.35   # 每次加碼動用「剩餘現金」的比例（分批，非一次打滿）
-    MAX_ADD_ONS = 3          # 最多加碼次數，避免無限追高
-
-    ENTRY_GRACE_BARS = 6     # 進場後N根K棒內，只有硬停損生效，追蹤停利暫不啟動（避免趨勢未明前被雜訊洗出）
-    PARTIAL_TP_PCT = 12.0    # 獲利達此門檻，先落袋一部分（不再是全有全無）
-    PARTIAL_TP_FRACTION = 0.35
-
-    ADD_ON_MAX_TEMP = 88.0        # 溫度分數超過此值視為過熱，暫停加碼
-    ADD_ON_MAX_EXTENSION = 0.06   # 價格偏離 MA10 超過6%視為過度乖離，暫停加碼（避免追在噴出末端）
-
-    def _trail_multiplier(self, peak_unrealized_pct: float) -> float:
-        """
-        追蹤停利倍數會隨『歷史最高獲利』自動收緊：
-        - 獲利尚淺（<10%）：给多一點空間（3.0倍ATR），避免主升浪初期被雜訊洗出去
-        - 獲利可觀（10%~25%）：收緊到 2.2 倍，開始鎖利
-        - 獲利豐厚（>=25%）：收緊到 1.5 倍，盡量貼著高點出場、逃頂
-        這是唯一的出場邏輯（搭配硬停損），取代原本 4-5 條互相耦合、各自帶魔術數字的規則。
-        """
-        if peak_unrealized_pct < 10.0:
-            return 3.0
-        elif peak_unrealized_pct < 25.0:
-            return 2.2
-        else:
-            return 1.5
-
     def run(self):
         df = self.df.copy()
         cash = self.initial_capital
         shares = 0
         avg_cost = 0.0
-
-        cooldown_counter = 0
-        last_trade_was_loss = False
-
-        highest_price_since_entry = 0.0
-        last_add_price = 0.0
-        add_on_count = 0
-        entry_bar_index = -1
-        took_partial_tp = False
-
+        
+        layers = 0
+        layer_size = self.initial_capital * 0.10
+        
         trades = []
         equity_curve = []
-
+        
         for i in range(len(df)):
-            if i < 20:
+            if i < 10:
                 continue
-
+                
             date = df.index[i]
             date_str = date.strftime("%Y-%m-%d")
             today = df.iloc[i]
             yesterday = df.iloc[i-1]
-            prev_20 = df.iloc[i-20:i]
-            prev_10 = df.iloc[i-10:i]
-
+            day_before = df.iloc[i-2] if i >= 2 else yesterday
+            
             price = float(today['Close'])
-            open_p = float(today['Open'])
             low = float(today['Low'])
-
+            
             ma5 = float(today['MA5']) if not np.isnan(today['MA5']) else price
             ma10 = float(today['MA10']) if not np.isnan(today['MA10']) else price
             ma20 = float(today['MA20']) if not np.isnan(today['MA20']) else price
-            ma60 = float(today['MA60']) if not np.isnan(today['MA60']) else price
-            rsi14 = float(today['RSI14']) if not np.isnan(today['RSI14']) else 50.0
-            temp = float(today['Temperature']) if not np.isnan(today['Temperature']) else 50.0
-            atr14 = float(today['ATR14']) if not np.isnan(today['ATR14']) else 0.0
-            yesterday_ma20 = float(yesterday['MA20']) if not np.isnan(yesterday['MA20']) else ma20
-
-            if cooldown_counter > 0:
-                cooldown_counter -= 1
-
-            # 斜率與結構判定（僅作為進場濾網，不再耦合到出場邏輯）
-            if i >= 25:
-                ma20_5d_ago = float(df.iloc[i-5]['MA20'])
-                ma20_slope_5d = ((ma20 - ma20_5d_ago) / ma20_5d_ago) * 100.0 if ma20_5d_ago > 0 else 0.0
-            else:
-                ma20_slope_5d = 0.0
-
-            is_downtrend_structure = (price < ma20 and ma20 < ma60)
-            is_steep_downtrend = (ma20_slope_5d <= -1.0) or is_downtrend_structure
-
-            # RSI 背離（左側抄底用）
-            price_low_20 = low < prev_20['Low'].min()
-            min_rsi_20 = prev_20['RSI14'].min()
-            rsi_diff = rsi14 - min_rsi_20
-            rsi_bullish_div = price_low_20 and (rsi_diff > 0)
-            is_bullish_candle = price > open_p
-
-            if shares > 0 and price > highest_price_since_entry:
-                highest_price_since_entry = price
+            
+            yesterday_close = float(yesterday['Close'])
+            yesterday_ma5 = float(yesterday['MA5']) if not np.isnan(yesterday['MA5']) else yesterday_close
 
             # ==========================================
-            # 1. 出場機制：硬停損 + 動態追蹤停利（唯一的獲利保護邏輯）
+            # 1. 離場訊號
             # ==========================================
             sold_today = False
-            if shares > 0:
+            
+            # 判斷跌破MA5且出現量價背離
+            break_ma5 = (price < ma5) and (yesterday_close >= yesterday_ma5)
+            ma5_rising = ma5 > yesterday_ma5
+            vol_shrinking = today['Vol_MA5'] < yesterday['Vol_MA5']
+
+            if layers > 0 and break_ma5 and ma5_rising and vol_shrinking:
+                sell_amount = shares * price
+                pnl = sell_amount - (shares * avg_cost)
+                cash += sell_amount
+                
                 unrealized_pct = ((price - avg_cost) / avg_cost) * 100.0
-                peak_unrealized_pct = ((highest_price_since_entry - avg_cost) / avg_cost) * 100.0
-                bars_since_entry = i - entry_bar_index
+                sell_shares = shares
+                shares = 0
+                avg_cost = 0.0
+                layers = 0
+                sold_today = True
 
-                exit_reason = None
-
-                # 🛑 1. 硬停損：不論行情如何、不論進場多久，永遠是最後防線
-                if unrealized_pct <= self.STOP_LOSS_PCT:
-                    exit_reason = f"🛑 {abs(self.STOP_LOSS_PCT):.0f}% 硬停損止血"
-
-                # 🎯 2. ATR 動態追蹤停利：進場後留一段「觀察期」不啟動，避免趨勢未明前被雜訊洗出
-                elif bars_since_entry >= self.ENTRY_GRACE_BARS:
-                    trail_mult = self._trail_multiplier(peak_unrealized_pct)
-                    trail_stop_price = highest_price_since_entry - trail_mult * atr14
-                    if atr14 > 0 and price <= trail_stop_price:
-                        exit_reason = f"🎯 動態追蹤停利觸發（峰值+{peak_unrealized_pct:.1f}%，{trail_mult:.1f}x ATR回落）"
-
-                if exit_reason is not None:
-                    gross_proceeds = shares * price
-                    net_proceeds = gross_proceeds * (1 - self.SELL_FEE_RATE - self.SELL_TAX_RATE)
-                    pnl = net_proceeds - (shares * avg_cost)
-                    cash += net_proceeds
-
-                    sell_shares = shares
-                    shares = 0
-                    avg_cost = 0.0
-                    highest_price_since_entry = 0.0
-                    last_add_price = 0.0
-                    add_on_count = 0
-                    entry_bar_index = -1
-                    took_partial_tp = False
-                    cooldown_counter = self.COOLDOWN_BARS
-                    last_trade_was_loss = (pnl < 0)
-                    sold_today = True
-
-                    trades.append({
-                        "Date": date, "日期": date_str, "動作": "全數賣出", "類別": "Sell", "原因": exit_reason,
-                        "成交價": price, "股數": sell_shares, "損益": round(pnl, 2), "報酬率": f"{unrealized_pct:+.2f}%",
-                        "當下倉位": "0 股 (0.0%)", "剩餘現金": round(cash, 2)
-                    })
-
-                # 💰 3. 分批鎖利：漲夠多先落袋一部分，不再是「全有或全無」
-                elif not took_partial_tp and unrealized_pct >= self.PARTIAL_TP_PCT:
-                    sell_shares = int(shares * self.PARTIAL_TP_FRACTION)
-                    if sell_shares > 0:
-                        gross_proceeds = sell_shares * price
-                        net_proceeds = gross_proceeds * (1 - self.SELL_FEE_RATE - self.SELL_TAX_RATE)
-                        pnl = net_proceeds - (sell_shares * avg_cost)
-                        cash += net_proceeds
-                        shares -= sell_shares
-                        took_partial_tp = True
-
-                        curr_val = cash + (shares * price)
-                        pos_pct = (shares * price / curr_val * 100) if curr_val > 0 else 0
-                        trades.append({
-                            "Date": date, "日期": date_str, "動作": "減碼鎖利", "類別": "Sell", "原因": f"💰 獲利達{self.PARTIAL_TP_PCT:.0f}%先落袋",
-                            "成交價": price, "股數": sell_shares, "損益": round(pnl, 2), "報酬率": f"{unrealized_pct:+.2f}%",
-                            "當下倉位": f"{shares:,} 股 ({pos_pct:.1f}%)", "剩餘現金": round(cash, 2)
-                        })
+                trades.append({
+                    "Date": date, "日期": date_str, "動作": "全數賣出", "類別": "Sell", "原因": "🚨 跌破MA5且量價背離", 
+                    "成交價": price, "股數": sell_shares, "損益": round(pnl, 2), "報酬率": f"{unrealized_pct:+.2f}%", 
+                    "當下倉位": "0 股 (0.0%)", "剩餘現金": round(cash, 2)
+                })
 
             if sold_today:
                 current_portfolio_value = cash
@@ -456,90 +315,75 @@ class StrategyBacktester:
             # ==========================================
             # 2. 進場與加倉機制
             # ==========================================
-            if cooldown_counter == 0 and temp <= 85.0:
+            if layers == 0:
+                # 判斷前一兩天是否縮量至新低
+                vol_low = (yesterday['Volume'] <= yesterday['Vol_Min_5']) or (day_before['Volume'] <= day_before['Vol_Min_5'])
+                # 判斷前一兩天RSI是否出現近5日底部
+                rsi_low = (yesterday['RSI14'] <= yesterday['RSI_Min_5']) or (day_before['RSI14'] <= day_before['RSI_Min_5'])
+                # 當日收盤站上MA5
+                above_ma5 = price > ma5
 
-                # 開倉邏輯（未持股）
-                if shares == 0:
-                    strict_rsi_cond = (rsi_diff > 15.0 and price > ma5) if last_trade_was_loss else True
+                if vol_low and rsi_low and above_ma5:
+                    buy_amount = layer_size * 2
+                    buy_shares = int(buy_amount / price)
+                    if buy_shares > 0 and cash >= buy_shares * price:
+                        cost = buy_shares * price
+                        cash -= cost
+                        shares = buy_shares
+                        avg_cost = price
+                        layers = 2
 
-                    # 🥶 方式 A：左側抄底
-                    if rsi_bullish_div and temp < 35.0 and is_bullish_candle and strict_rsi_cond and not is_steep_downtrend:
-                        buy_budget = self.initial_capital * 0.20
-                        buy_shares = int(buy_budget / (price * (1 + self.BUY_FEE_RATE)))
-                        if buy_shares > 0 and cash >= buy_shares * price * (1 + self.BUY_FEE_RATE):
-                            cost = buy_shares * price * (1 + self.BUY_FEE_RATE)
-                            cash -= cost
-                            shares = buy_shares
-                            avg_cost = price * (1 + self.BUY_FEE_RATE)
-                            last_add_price = price
-                            highest_price_since_entry = price
-                            add_on_count = 0
-                            entry_bar_index = i
-                            took_partial_tp = False
+                        curr_val = cash + (shares * price)
+                        pos_pct = (shares * price / curr_val * 100) if curr_val > 0 else 0
+                        trades.append({
+                            "Date": date, "日期": date_str, "動作": "建倉(2層底倉)", "類別": "Buy", "原因": "🌱 縮量RSI見底且站上MA5", 
+                            "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%", 
+                            "當下倉位": f"{shares:,} 股 ({pos_pct:.1f}%)", "剩餘現金": round(cash, 2)
+                        })
 
-                            curr_val = cash + (shares * price)
-                            pos_pct = (shares * price / curr_val * 100) if curr_val > 0 else 0
-                            trades.append({
-                                "Date": date, "日期": date_str, "動作": "建倉(20%)", "類別": "Buy", "原因": "🥶 極寒抄底 (結構正常)",
-                                "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%",
-                                "當下倉位": f"{shares:,} 股 ({pos_pct:.1f}%)", "剩餘現金": round(cash, 2)
-                            })
+            elif layers > 0:
+                # 一旦站上MA20馬上加到8層
+                if price > ma20 and layers < 8:
+                    layers_to_add = 8 - layers
+                    buy_amount = layer_size * layers_to_add
+                    buy_shares = int(buy_amount / price)
+                    
+                    if buy_shares > 0 and cash >= buy_shares * price:
+                        total_cost = (shares * avg_cost) + (buy_shares * price)
+                        shares += buy_shares
+                        avg_cost = total_cost / shares
+                        cash -= (buy_shares * price)
+                        layers = 8
 
-                    # 📈 方式 B：右側強勢突破
-                    elif price > ma20 and (ma5 > ma10) and is_bullish_candle:
-                        ma20_turning_up = ma20 >= yesterday_ma20
-                        is_5d_high = price >= prev_10['Close'].iloc[-5:].max()
-
-                        if ma20_turning_up and is_5d_high:
-                            buy_budget = self.initial_capital * 0.30
-                            buy_shares = int(buy_budget / (price * (1 + self.BUY_FEE_RATE)))
-                            if buy_shares > 0 and cash >= buy_shares * price * (1 + self.BUY_FEE_RATE):
-                                cost = buy_shares * price * (1 + self.BUY_FEE_RATE)
-                                cash -= cost
-                                shares = buy_shares
-                                avg_cost = price * (1 + self.BUY_FEE_RATE)
-                                last_add_price = price
-                                highest_price_since_entry = price
-                                add_on_count = 0
-                                entry_bar_index = i
-                                took_partial_tp = False
-
-                                curr_val = cash + (shares * price)
-                                pos_pct = (shares * price / curr_val * 100) if curr_val > 0 else 0
-                                trades.append({
-                                    "Date": date, "日期": date_str, "動作": "建倉(30%)", "類別": "Buy", "原因": "🚀 右側突破 (MA20翻揚+創5日新高)",
-                                    "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%",
-                                    "當下倉位": f"{shares:,} 股 ({pos_pct:.1f}%)", "剩餘現金": round(cash, 2)
-                                })
-
-                # 加碼邏輯（已持股，分批加碼、非一次打滿）
-                elif shares > 0 and cash > 0 and add_on_count < self.MAX_ADD_ONS:
-                    price_change_from_last = (price - last_add_price) / last_add_price
-                    extension_from_ma10 = (price - ma10) / ma10 if ma10 > 0 else 0.0
-
-                    # 🌡️ 過熱濾網：溫度過高或乖離MA10過大，代表這波已經漲多，暫停追高加碼
-                    #    （避免在噴出末端把平均成本推到接近最高點，這是上一版最大的漏洞）
-                    is_overheated = (temp >= self.ADD_ON_MAX_TEMP) or (extension_from_ma10 >= self.ADD_ON_MAX_EXTENSION)
-
-                    # 🚀 趨勢確立分批加碼：每再漲 3% 且站穩 MA5、且未過熱，動用「剩餘現金」的 35%（非全押）
-                    if price_change_from_last >= self.ADD_ON_STEP_PCT and price > ma5 and not is_overheated:
-                        add_budget = cash * self.ADD_ON_FRACTION
-                        add_shares = int(add_budget / (price * (1 + self.BUY_FEE_RATE)))
-                        if add_shares > 0:
-                            add_cost = add_shares * price * (1 + self.BUY_FEE_RATE)
-                            total_cost_basis = (shares * avg_cost) + add_cost
-                            shares += add_shares
-                            avg_cost = total_cost_basis / shares
-                            cash -= add_cost
-                            last_add_price = price
-                            add_on_count += 1
+                        curr_val = cash + (shares * price)
+                        pos_pct = (shares * price / curr_val * 100) if curr_val > 0 else 0
+                        trades.append({
+                            "Date": date, "日期": date_str, "動作": "加碼至8層", "類別": "Buy", "原因": "🚀 站上MA20強勢加碼", 
+                            "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%", 
+                            "當下倉位": f"{shares:,} 股 ({pos_pct:.1f}%)", "剩餘現金": round(cash, 2)
+                        })
+                
+                # 剩下兩層每次回測MA10，前3天沒有縮量跡象就加一層
+                elif 8 <= layers < 10:
+                    touch_ma10 = (low <= ma10)
+                    no_shrink = (today['Vol_MA3'] >= today['Vol_MA10'])
+                    
+                    if touch_ma10 and no_shrink:
+                        buy_amount = layer_size * 1
+                        buy_shares = int(buy_amount / price)
+                        
+                        if buy_shares > 0 and cash >= buy_shares * price:
+                            total_cost = (shares * avg_cost) + (buy_shares * price)
+                            shares += buy_shares
+                            avg_cost = total_cost / shares
+                            cash -= (buy_shares * price)
+                            layers += 1
 
                             curr_val = cash + (shares * price)
                             pos_pct = (shares * price / curr_val * 100) if curr_val > 0 else 0
                             trades.append({
-                                "Date": date, "日期": date_str, "動作": f"加碼({add_on_count}/{self.MAX_ADD_ONS})",
-                                "類別": "Buy", "原因": f"🚀 趨勢確立分批加碼 ({price_change_from_last:+.1%})",
-                                "成交價": price, "股數": add_shares, "損益": 0.0, "報酬率": "0.00%",
+                                "Date": date, "日期": date_str, "動作": "回測加碼1層", "類別": "Buy", "原因": "📈 回測MA10且未見縮量", 
+                                "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%", 
                                 "當下倉位": f"{shares:,} 股 ({pos_pct:.1f}%)", "剩餘現金": round(cash, 2)
                             })
 
@@ -553,7 +397,7 @@ class StrategyBacktester:
 
         df_equity = pd.DataFrame(equity_curve).set_index("Date")
         df_trades = pd.DataFrame(trades)
-
+        
         return df_equity, df_trades, df
 
 # ==========================================
@@ -617,6 +461,12 @@ def load_db():
 # 5. Streamlit GUI 主介面
 # ==========================================
 st.set_page_config(page_title="動態溫控策略回測系統", layout="wide", page_icon="📜")
+
+# 日期記憶功能初始化
+if "bt_start_date" not in st.session_state:
+    st.session_state.bt_start_date = datetime.now() - timedelta(days=365 * 2)
+if "bt_end_date" not in st.session_state:
+    st.session_state.bt_end_date = datetime.now()
 
 if "db" not in st.session_state:
     st.session_state.db = load_db()
@@ -698,10 +548,9 @@ with col_bt1:
         key="bt_symbol"
     )
 with col_bt2:
-    default_start = datetime.now() - timedelta(days=365 * 2)
-    bt_start = st.date_input("回測開始日期", value=default_start)
+    bt_start = st.date_input("回測開始日期", value=st.session_state.bt_start_date)
 with col_bt3:
-    bt_end = st.date_input("回測結束日期", value=datetime.now())
+    bt_end = st.date_input("回測結束日期", value=st.session_state.bt_end_date)
 
 col_cap1, col_cap2 = st.columns([2, 4])
 with col_cap1:
@@ -709,6 +558,10 @@ with col_cap1:
     bt_capital = st.number_input("初始回測資金", min_value=10000.0, max_value=10000000.0, value=init_cap, step=50000.0)
 
 if st.button("🚀 開始歷史回測模擬", type="primary"):
+    # 儲存回測日期設定至系統記憶
+    st.session_state.bt_start_date = bt_start
+    st.session_state.bt_end_date = bt_end
+    
     start_str = bt_start.strftime("%Y-%m-%d")
     end_str = bt_end.strftime("%Y-%m-%d")
 
@@ -737,8 +590,8 @@ if st.button("🚀 開始歷史回測模擬", type="primary"):
                     drawdown = (equity_series - cummax) / cummax
                     max_drawdown = drawdown.min() * 100.0 if not drawdown.empty else 0.0
 
-                    if not df_trades.empty and any(act in df_trades["動作"].values for act in ["全數賣出", "清倉離場", "減碼鎖利"]):
-                        closed_trades = df_trades[df_trades["動作"].isin(["全數賣出", "清倉離場", "減碼鎖利"])]
+                    if not df_trades.empty and any(act in df_trades["動作"].values for act in ["全數賣出", "清倉離場"]):
+                        closed_trades = df_trades[df_trades["動作"].isin(["全數賣出", "清倉離場"])]
                         win_count = len(closed_trades[closed_trades["損益"] > 0])
                         total_closed = len(closed_trades)
                         win_rate = (win_count / total_closed * 100.0) if total_closed > 0 else 0.0
@@ -841,133 +694,3 @@ if st.button("🚀 開始歷史回測模擬", type="primary"):
 
         except Exception as ex:
             st.error(f"執行歷史回測失敗: {ex}")
-
-# ==========================================
-# 6. 策略穩健度測試（多區間交叉驗證）
-# ==========================================
-st.markdown("---")
-st.title("🧪 策略穩健度測試（多區間交叉驗證）")
-st.caption("同一套邏輯、同一組參數，自動在多個不同起訖日期的區間各跑一次，用報酬分布來判斷策略是否穩健，而不是只看單一區間的一張圖。")
-
-col_r1, col_r2, col_r3, col_r4 = st.columns([2, 1.3, 1.3, 1.3])
-with col_r1:
-    robust_symbol = st.selectbox(
-        "選擇測試標的",
-        options=stock_keys,
-        format_func=lambda x: stock_options[x] if x in stock_options else x,
-        key="robust_symbol"
-    )
-with col_r2:
-    lookback_years = st.number_input("總回溯年數", min_value=1.0, max_value=8.0, value=3.0, step=0.5, key="robust_lookback")
-with col_r3:
-    window_months = st.number_input("單一測試區間長度(月)", min_value=2, max_value=24, value=6, step=1, key="robust_window")
-with col_r4:
-    step_months = st.number_input("區間滑動步長(月)", min_value=1, max_value=12, value=1, step=1, key="robust_step")
-
-robust_capital = st.number_input("每個區間的初始回測資金", min_value=10000.0, max_value=10000000.0, value=200000.0, step=50000.0, key="robust_capital")
-
-if st.button("🧪 開始多區間穩健度測試", type="secondary"):
-    overall_end = datetime.now()
-    overall_start = overall_end - timedelta(days=int(lookback_years * 365))
-
-    windows = []
-    cur_start = pd.Timestamp(overall_start)
-    overall_end_ts = pd.Timestamp(overall_end)
-    while True:
-        cur_end = cur_start + pd.DateOffset(months=int(window_months))
-        if cur_end > overall_end_ts:
-            break
-        windows.append((cur_start, cur_end))
-        cur_start = cur_start + pd.DateOffset(months=int(step_months))
-
-    if not windows:
-        st.warning("設定的區間長度大於總回溯年數，無法產生任何測試區間，請調整參數。")
-    else:
-        with st.spinner(f"正在擷取 {robust_symbol} 完整歷史行情並執行 {len(windows)} 個區間回測..."):
-            try:
-                fetch_start = (overall_start - timedelta(days=150)).strftime("%Y-%m-%d")
-                fetch_end = overall_end.strftime("%Y-%m-%d")
-                df_full_raw, src_full = cached_fetch_ohlc(robust_symbol, start_date=fetch_start, end_date=fetch_end)
-
-                if df_full_raw.empty or len(df_full_raw) < 60:
-                    st.error("歷史數據不足，無法執行穩健度測試。")
-                else:
-                    results = []
-                    for w_start, w_end in windows:
-                        w_start_str = w_start.strftime("%Y-%m-%d")
-                        w_end_str = w_end.strftime("%Y-%m-%d")
-                        try:
-                            bt_w = StrategyBacktester(df_full_raw, initial_capital=robust_capital,
-                                                       start_date=w_start_str, end_date=w_end_str)
-                            df_eq_w, df_tr_w, _ = bt_w.run()
-
-                            if df_eq_w.empty:
-                                continue
-
-                            final_val = df_eq_w["策略資產淨值"].iloc[-1]
-                            bench_val = df_eq_w["買入持有基準"].iloc[-1]
-                            strat_ret = (final_val - robust_capital) / robust_capital * 100.0
-                            bench_ret = (bench_val - robust_capital) / robust_capital * 100.0
-
-                            eq_series = df_eq_w["策略資產淨值"]
-                            cummax = eq_series.cummax()
-                            dd = (eq_series - cummax) / cummax
-                            mdd = dd.min() * 100.0 if not dd.empty else 0.0
-
-                            n_trades = len(df_tr_w) if not df_tr_w.empty else 0
-
-                            results.append({
-                                "區間起": w_start_str, "區間迄": w_end_str,
-                                "策略報酬%": round(strat_ret, 2), "買入持有%": round(bench_ret, 2),
-                                "超額報酬%": round(strat_ret - bench_ret, 2),
-                                "最大回撤%": round(mdd, 2), "交易次數": n_trades
-                            })
-                        except Exception:
-                            continue
-
-                    if not results:
-                        st.warning("所有測試區間都沒有產生有效結果，可能是資料不足。")
-                    else:
-                        df_results = pd.DataFrame(results)
-
-                        rets = df_results["策略報酬%"]
-                        win_windows = (rets > 0).sum()
-                        total_windows = len(rets)
-
-                        st.markdown("#### 📊 穩健度總覽")
-                        s1, s2, s3, s4, s5 = st.columns(5)
-                        s1.metric("測試區間數", f"{total_windows}")
-                        s2.metric("平均報酬率", f"{rets.mean():+.2f}%")
-                        s3.metric("報酬率標準差", f"{rets.std():.2f}%", help="數字越大代表結果隨區間變動越劇烈，策略越不穩健")
-                        s4.metric("正報酬區間佔比", f"{win_windows}/{total_windows} ({win_windows/total_windows*100:.0f}%)")
-                        s5.metric("最差區間", f"{rets.min():+.2f}%")
-
-                        if rets.std() > abs(rets.mean()):
-                            st.warning("⚠️ 報酬率標準差大於平均報酬率，代表結果對區間選擇很敏感，建議先別急著加大部位或調整參數去追單一張圖的績效，應優先降低這種波動。")
-                        else:
-                            st.success("✅ 平均報酬相對於區間間的波動來說是正的且不算小，穩健度尚可，但仍建議搭配不同標的多測幾次。")
-
-                        st.markdown("---")
-                        st.markdown("#### 📈 各區間報酬率分布")
-                        fig_dist = go.Figure()
-                        fig_dist.add_trace(go.Bar(
-                            x=df_results["區間起"], y=df_results["策略報酬%"], name="策略報酬%",
-                            marker_color=['#26a69a' if v >= 0 else '#ef5350' for v in df_results["策略報酬%"]]
-                        ))
-                        fig_dist.add_trace(go.Scatter(
-                            x=df_results["區間起"], y=df_results["買入持有%"], name="買入持有%",
-                            mode='lines+markers', line=dict(color='#B0BEC5', dash='dash')
-                        ))
-                        fig_dist.update_layout(
-                            title=f"{robust_symbol} 各滾動區間策略報酬 vs 買入持有",
-                            xaxis_title="區間起始日", yaxis_title="報酬率 (%)",
-                            template="plotly_white", height=400, hovermode="x unified"
-                        )
-                        st.plotly_chart(fig_dist, use_container_width=True)
-
-                        st.markdown("---")
-                        st.markdown("#### 📜 各區間詳細數據")
-                        st.dataframe(df_results, use_container_width=True, hide_index=True)
-
-            except Exception as ex:
-                st.error(f"執行穩健度測試失敗: {ex}")
