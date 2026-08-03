@@ -267,7 +267,7 @@ class TradingStrategyEngine:
         return df
 
 # ==========================================
-# 3. 歷史回測引擎 (MA5 3天角度防禦版)
+# 3. 歷史回測引擎 (MA5 3天角度過濾版)
 # ==========================================
 class StrategyBacktester:
     def __init__(self, df: pd.DataFrame, initial_capital: float = 200000.0, start_date: str = None, end_date: str = None):
@@ -288,7 +288,7 @@ class StrategyBacktester:
         took_profit_15 = False
         took_atr_profit = False
         has_crossed_ma20 = False
-        cooldown_counter = 0        # 清倉冷卻計數器
+        cooldown_counter = 0        # 🛡️ 清倉冷卻計數器
         last_trade_was_loss = False # 紀錄上一筆是否停損
         
         highest_price_since_entry = 0.0
@@ -326,16 +326,23 @@ class StrategyBacktester:
             if cooldown_counter > 0:
                 cooldown_counter -= 1
 
-            # 📐 計算 MA5 在 3 天內的下彎角度 (Degree)
+            # 📐 計算 MA5 3天內的下彎角度 (向右下傾斜角度)
             if i >= 23:
                 ma5_3d_ago = float(df.iloc[i-3]['MA5'])
-                pct_change_3d = ((ma5 - ma5_3d_ago) / ma5_3d_ago) * 100.0 if ma5_3d_ago > 0 else 0.0
-                ma5_angle_3d = math.degrees(math.atan(pct_change_3d))
+                if ma5_3d_ago > 0:
+                    pct_change_3d = ((ma5 - ma5_3d_ago) / ma5_3d_ago) * 100.0
+                    # 當百分比率小於 0，計算下傾角度 (arctan)
+                    if pct_change_3d < 0:
+                        angle_down_deg = math.degrees(math.atan(abs(pct_change_3d)))
+                    else:
+                        angle_down_deg = 0.0
+                else:
+                    angle_down_deg = 0.0
             else:
-                ma5_angle_3d = 0.0
+                angle_down_deg = 0.0
 
-            # 🛑 角度條件：MA5 3天內下彎角度大於 30 度 (即角度 <= -30.0°) 時禁止抄底
-            is_steep_downtrend = (ma5_angle_3d <= -30.0)
+            # 🛑 核心禁止抄底條件：MA5 3天內向右下傾斜大於 30 度
+            is_steep_angle = (angle_down_deg > 30.0)
 
             # RSI 底背離計算
             price_low_20 = low < prev_20['Low'].min()
@@ -476,7 +483,7 @@ class StrategyBacktester:
                 continue
 
             # ==========================================
-            # 2. 進場與加倉機制 (角度過濾 + 冷卻期)
+            # 2. 進場與加倉機制 (MA5 傾角過濾 + 冷卻期)
             # ==========================================
             if cooldown_counter == 0 and temp <= 80.0:
 
@@ -484,8 +491,8 @@ class StrategyBacktester:
                 if shares == 0:
                     strict_rsi_cond = (rsi_diff > 20.0 and price > ma5) if last_trade_was_loss else True
 
-                    # 🚫 當 MA5 3天內下彎角度 > 30度 (angle <= -30°) 時，強制禁止抄底
-                    if rsi_bullish_div and temp < 35.0 and is_bullish_candle and strict_rsi_cond and not is_steep_downtrend:
+                    # 🚫 核心條件：MA5 3天內下傾角度未超過 30度，才允許抄底
+                    if rsi_bullish_div and temp < 35.0 and is_bullish_candle and strict_rsi_cond and not is_steep_angle:
                         buy_budget = self.initial_capital * 0.15
                         buy_shares = int(buy_budget / price)
                         if buy_shares > 0 and cash >= buy_shares * price:
@@ -502,7 +509,7 @@ class StrategyBacktester:
                             curr_val = cash + (shares * price)
                             pos_pct = (shares * price / curr_val * 100) if curr_val > 0 else 0
                             trades.append({
-                                "Date": date, "日期": date_str, "動作": "建倉(15%)", "類別": "Buy", "原因": f"🥶 極寒抄底 (MA5角度{ma5_angle_3d:.1f}°)", 
+                                "Date": date, "日期": date_str, "動作": "建倉(15%)", "類別": "Buy", "原因": f"🥶 極寒抄底 (MA5下傾角{angle_down_deg:.1f}°<=30°)", 
                                 "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%", 
                                 "當下倉位": f"{shares:,} 股 ({pos_pct:.1f}%)", "剩餘現金": round(cash, 2)
                             })
