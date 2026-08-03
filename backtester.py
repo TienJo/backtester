@@ -322,19 +322,18 @@ class StrategyBacktester:
             breakout_20_high = (price > high_20) and (vol_ratio >= 1.2)
             bullish_trend = price > ma20 and ma5 > ma20
 
-            # RSI 背離計算 (近 3 天內曾創新低 + 今日陽線 + 站上 MA5)
-            made_new_low_recently = (prev_3['Low'].min() < prev_10['Low'].min()) or (low < prev_10['Low'].min())
+            # 1. 首次極寒抄底訊號：RSI底背離 (創10日低點且RSI未創新低) + 溫度 < 35度
+            price_low_10 = low < prev_10['Low'].min()
             min_rsi_10 = prev_10['RSI14'].min()
-            rsi_diff = rsi14 - min_rsi_10
+            rsi_bullish_div = price_low_10 and (rsi14 > min_rsi_10) and (rsi14 < 45)
+            first_bottom_signal = rsi_bullish_div and (temp < 35.0)
             
-            # 陽線且站上 MA5 的止跌訊號
-            is_rebound_candle = (price > open_price) and (price > ma5)
+            # 2. **更新後二次抄底條件**：3日內 RSI 成長 > 20點 + 當日陽線 + 收盤價 > MA5
+            min_rsi_3 = prev_3['RSI14'].min()
+            rsi_gain_3d = rsi14 - min_rsi_3
+            is_bullish_candle = price > open_price
             
-            # 1. 新修訂的極寒抄底：近 3 天內曾創 10 日新低 + 今日陽線站上 MA5 + T < 35度 + RSI < 45
-            first_bottom_signal = made_new_low_recently and is_rebound_candle and (temp < 35.0) and (rsi14 < 45.0)
-            
-            # 2. 停損後的二次探底條件：RSI背離 > 20點 + 最低價 > MA5
-            second_bottom_signal = made_new_low_recently and (rsi_diff > 20.0) and (low > ma5)
+            second_bottom_signal = (rsi_gain_3d >= 20.0) and is_bullish_candle and (price > ma5)
 
             # 1. 出場與減倉機制
             sold_today = False
@@ -416,7 +415,7 @@ class StrategyBacktester:
 
             # 2. 建倉與加倉機制
             if shares == 0:
-                # 情境 A：曾停損離場，需滿足「二次探底：RSI背離>20且低點>MA5」
+                # 情境 A：曾經停損，依據新規則觸發「二次抄底」
                 if has_stopped_out:
                     if second_bottom_signal:
                         buy_budget = self.initial_capital * 0.4
@@ -429,11 +428,11 @@ class StrategyBacktester:
                             took_profit = False
                             has_stopped_out = False
                             trades.append({
-                                "日期": date_str, "動作": "建倉(40%)", "原因": f"🎯 二次探底建倉 (RSI背離達+{rsi_diff:.1f}點且低點>MA5)", 
+                                "日期": date_str, "動作": "建倉(40%)", "原因": f"🎯 二次抄底建倉 (3日RSI拉升+{rsi_gain_3d:.1f}點+陽線站上MA5)", 
                                 "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%", "剩餘現金": cash
                             })
 
-                # 情境 B：初始或正常建倉
+                # 情境 B：初始或正常建倉 (T < 35度 + 背離)
                 else:
                     if first_bottom_signal:
                         buy_budget = self.initial_capital * 0.4
@@ -445,7 +444,7 @@ class StrategyBacktester:
                             avg_cost = price
                             took_profit = False
                             trades.append({
-                                "日期": date_str, "動作": "建倉(40%)", "原因": "🎯 極寒抄底 (T < 35度 + 近3日創新低後陽線站上MA5)", 
+                                "日期": date_str, "動作": "建倉(40%)", "原因": "🎯 極寒抄底 (T < 35度 + RSI底背離)", 
                                 "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%", "剩餘現金": cash
                             })
                     elif breakout_20_high and 35.0 <= temp <= 80.0:
