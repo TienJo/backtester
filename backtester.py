@@ -291,6 +291,13 @@ class StrategyBacktester:
     ADD_ON_FRACTION = 0.35   # 每次加碼動用「剩餘現金」的比例（分批，非一次打滿）
     MAX_ADD_ONS = 3          # 最多加碼次數，避免無限追高
 
+    ENTRY_GRACE_BARS = 6     # 進場後N根K棒內，只有硬停損生效，追蹤停利暫不啟動（避免趨勢未明前被雜訊洗出）
+    PARTIAL_TP_PCT = 12.0    # 獲利達此門檻，先落袋一部分（不再是全有全無）
+    PARTIAL_TP_FRACTION = 0.35
+
+    ADD_ON_MAX_TEMP = 88.0        # 溫度分數超過此值視為過熱，暫停加碼
+    ADD_ON_MAX_EXTENSION = 0.06   # 價格偏離 MA10 超過6%視為過度乖離，暫停加碼（避免追在噴出末端）
+
     def _trail_multiplier(self, peak_unrealized_pct: float) -> float:
         """
         追蹤停利倍數會隨『歷史最高獲利』自動收緊：
@@ -318,6 +325,8 @@ class StrategyBacktester:
         highest_price_since_entry = 0.0
         last_add_price = 0.0
         add_on_count = 0
+        entry_bar_index = -1
+        took_partial_tp = False
 
         trades = []
         equity_curve = []
@@ -376,14 +385,16 @@ class StrategyBacktester:
             if shares > 0:
                 unrealized_pct = ((price - avg_cost) / avg_cost) * 100.0
                 peak_unrealized_pct = ((highest_price_since_entry - avg_cost) / avg_cost) * 100.0
+                bars_since_entry = i - entry_bar_index
 
                 exit_reason = None
 
-                # 🛑 1. 硬停損：不論行情如何，永遠是最後防線
+                # 🛑 1. 硬停損：不論行情如何、不論進場多久，永遠是最後防線
                 if unrealized_pct <= self.STOP_LOSS_PCT:
                     exit_reason = f"🛑 {abs(self.STOP_LOSS_PCT):.0f}% 硬停損止血"
-                else:
-                    # 🎯 2. ATR 動態追蹤停利：倍數隨歷史最高獲利自動收緊，貼著高點逃頂
+
+                # 🎯 2. ATR 動態追蹤停利：進場後留一段「觀察期」不啟動，避免趨勢未明前被雜訊洗出
+                elif bars_since_entry >= self.ENTRY_GRACE_BARS:
                     trail_mult = self._trail_multiplier(peak_unrealized_pct)
                     trail_stop_price = highest_price_since_entry - trail_mult * atr14
                     if atr14 > 0 and price <= trail_stop_price:
@@ -401,6 +412,8 @@ class StrategyBacktester:
                     highest_price_since_entry = 0.0
                     last_add_price = 0.0
                     add_on_count = 0
+                    entry_bar_index = -1
+                    took_partial_tp = False
                     cooldown_counter = self.COOLDOWN_BARS
                     last_trade_was_loss = (pnl < 0)
                     sold_today = True
@@ -410,6 +423,25 @@ class StrategyBacktester:
                         "成交價": price, "股數": sell_shares, "損益": round(pnl, 2), "報酬率": f"{unrealized_pct:+.2f}%",
                         "當下倉位": "0 股 (0.0%)", "剩餘現金": round(cash, 2)
                     })
+
+                # 💰 3. 分批鎖利：漲夠多先落袋一部分，不再是「全有或全無」
+                elif not took_partial_tp and unrealized_pct >= self.PARTIAL_TP_PCT:
+                    sell_shares = int(shares * self.PARTIAL_TP_FRACTION)
+                    if sell_shares > 0:
+                        gross_proceeds = sell_shares * price
+                        net_proceeds = gross_proceeds * (1 - self.SELL_FEE_RATE - self.SELL_TAX_RATE)
+                        pnl = net_proceeds - (sell_shares * avg_cost)
+                        cash += net_proceeds
+                        shares -= sell_shares
+                        took_partial_tp = True
+
+                        curr_val = cash + (shares * price)
+                        pos_pct = (shares * price / curr_val * 100) if curr_val > 0 else 0
+                        trades.append({
+                            "Date": date, "日期": date_str, "動作": "減碼鎖利", "類別": "Sell", "原因": f"💰 獲利達{self.PARTIAL_TP_PCT:.0f}%先落袋",
+                            "成交價": price, "股數": sell_shares, "損益": round(pnl, 2), "報酬率": f"{unrealized_pct:+.2f}%",
+                            "當下倉位": f"{shares:,} 股 ({pos_pct:.1f}%)", "剩餘現金": round(cash, 2)
+                        })
 
             if sold_today:
                 current_portfolio_value = cash
@@ -442,6 +474,8 @@ class StrategyBacktester:
                             last_add_price = price
                             highest_price_since_entry = price
                             add_on_count = 0
+                            entry_bar_index = i
+                            took_partial_tp = False
 
                             curr_val = cash + (shares * price)
                             pos_pct = (shares * price / curr_val * 100) if curr_val > 0 else 0
@@ -467,6 +501,8 @@ class StrategyBacktester:
                                 last_add_price = price
                                 highest_price_since_entry = price
                                 add_on_count = 0
+                                entry_bar_index = i
+                                took_partial_tp = False
 
                                 curr_val = cash + (shares * price)
                                 pos_pct = (shares * price / curr_val * 100) if curr_val > 0 else 0
@@ -479,9 +515,14 @@ class StrategyBacktester:
                 # 加碼邏輯（已持股，分批加碼、非一次打滿）
                 elif shares > 0 and cash > 0 and add_on_count < self.MAX_ADD_ONS:
                     price_change_from_last = (price - last_add_price) / last_add_price
+                    extension_from_ma10 = (price - ma10) / ma10 if ma10 > 0 else 0.0
 
-                    # 🚀 趨勢確立分批加碼：每再漲 3% 且站穩 MA5，動用「剩餘現金」的 35%（非全押）
-                    if price_change_from_last >= self.ADD_ON_STEP_PCT and price > ma5:
+                    # 🌡️ 過熱濾網：溫度過高或乖離MA10過大，代表這波已經漲多，暫停追高加碼
+                    #    （避免在噴出末端把平均成本推到接近最高點，這是上一版最大的漏洞）
+                    is_overheated = (temp >= self.ADD_ON_MAX_TEMP) or (extension_from_ma10 >= self.ADD_ON_MAX_EXTENSION)
+
+                    # 🚀 趨勢確立分批加碼：每再漲 3% 且站穩 MA5、且未過熱，動用「剩餘現金」的 35%（非全押）
+                    if price_change_from_last >= self.ADD_ON_STEP_PCT and price > ma5 and not is_overheated:
                         add_budget = cash * self.ADD_ON_FRACTION
                         add_shares = int(add_budget / (price * (1 + self.BUY_FEE_RATE)))
                         if add_shares > 0:
@@ -696,8 +737,8 @@ if st.button("🚀 開始歷史回測模擬", type="primary"):
                     drawdown = (equity_series - cummax) / cummax
                     max_drawdown = drawdown.min() * 100.0 if not drawdown.empty else 0.0
 
-                    if not df_trades.empty and any(act in df_trades["動作"].values for act in ["全數賣出", "清倉離場", "減碼50%"]):
-                        closed_trades = df_trades[df_trades["動作"].isin(["全數賣出", "清倉離場", "減碼50%"])]
+                    if not df_trades.empty and any(act in df_trades["動作"].values for act in ["全數賣出", "清倉離場", "減碼鎖利"]):
+                        closed_trades = df_trades[df_trades["動作"].isin(["全數賣出", "清倉離場", "減碼鎖利"])]
                         win_count = len(closed_trades[closed_trades["損益"] > 0])
                         total_closed = len(closed_trades)
                         win_rate = (win_count / total_closed * 100.0) if total_closed > 0 else 0.0
