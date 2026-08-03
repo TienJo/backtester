@@ -841,3 +841,133 @@ if st.button("🚀 開始歷史回測模擬", type="primary"):
 
         except Exception as ex:
             st.error(f"執行歷史回測失敗: {ex}")
+
+# ==========================================
+# 6. 策略穩健度測試（多區間交叉驗證）
+# ==========================================
+st.markdown("---")
+st.title("🧪 策略穩健度測試（多區間交叉驗證）")
+st.caption("同一套邏輯、同一組參數，自動在多個不同起訖日期的區間各跑一次，用報酬分布來判斷策略是否穩健，而不是只看單一區間的一張圖。")
+
+col_r1, col_r2, col_r3, col_r4 = st.columns([2, 1.3, 1.3, 1.3])
+with col_r1:
+    robust_symbol = st.selectbox(
+        "選擇測試標的",
+        options=stock_keys,
+        format_func=lambda x: stock_options[x] if x in stock_options else x,
+        key="robust_symbol"
+    )
+with col_r2:
+    lookback_years = st.number_input("總回溯年數", min_value=1.0, max_value=8.0, value=3.0, step=0.5, key="robust_lookback")
+with col_r3:
+    window_months = st.number_input("單一測試區間長度(月)", min_value=2, max_value=24, value=6, step=1, key="robust_window")
+with col_r4:
+    step_months = st.number_input("區間滑動步長(月)", min_value=1, max_value=12, value=1, step=1, key="robust_step")
+
+robust_capital = st.number_input("每個區間的初始回測資金", min_value=10000.0, max_value=10000000.0, value=200000.0, step=50000.0, key="robust_capital")
+
+if st.button("🧪 開始多區間穩健度測試", type="secondary"):
+    overall_end = datetime.now()
+    overall_start = overall_end - timedelta(days=int(lookback_years * 365))
+
+    windows = []
+    cur_start = pd.Timestamp(overall_start)
+    overall_end_ts = pd.Timestamp(overall_end)
+    while True:
+        cur_end = cur_start + pd.DateOffset(months=int(window_months))
+        if cur_end > overall_end_ts:
+            break
+        windows.append((cur_start, cur_end))
+        cur_start = cur_start + pd.DateOffset(months=int(step_months))
+
+    if not windows:
+        st.warning("設定的區間長度大於總回溯年數，無法產生任何測試區間，請調整參數。")
+    else:
+        with st.spinner(f"正在擷取 {robust_symbol} 完整歷史行情並執行 {len(windows)} 個區間回測..."):
+            try:
+                fetch_start = (overall_start - timedelta(days=150)).strftime("%Y-%m-%d")
+                fetch_end = overall_end.strftime("%Y-%m-%d")
+                df_full_raw, src_full = cached_fetch_ohlc(robust_symbol, start_date=fetch_start, end_date=fetch_end)
+
+                if df_full_raw.empty or len(df_full_raw) < 60:
+                    st.error("歷史數據不足，無法執行穩健度測試。")
+                else:
+                    results = []
+                    for w_start, w_end in windows:
+                        w_start_str = w_start.strftime("%Y-%m-%d")
+                        w_end_str = w_end.strftime("%Y-%m-%d")
+                        try:
+                            bt_w = StrategyBacktester(df_full_raw, initial_capital=robust_capital,
+                                                       start_date=w_start_str, end_date=w_end_str)
+                            df_eq_w, df_tr_w, _ = bt_w.run()
+
+                            if df_eq_w.empty:
+                                continue
+
+                            final_val = df_eq_w["策略資產淨值"].iloc[-1]
+                            bench_val = df_eq_w["買入持有基準"].iloc[-1]
+                            strat_ret = (final_val - robust_capital) / robust_capital * 100.0
+                            bench_ret = (bench_val - robust_capital) / robust_capital * 100.0
+
+                            eq_series = df_eq_w["策略資產淨值"]
+                            cummax = eq_series.cummax()
+                            dd = (eq_series - cummax) / cummax
+                            mdd = dd.min() * 100.0 if not dd.empty else 0.0
+
+                            n_trades = len(df_tr_w) if not df_tr_w.empty else 0
+
+                            results.append({
+                                "區間起": w_start_str, "區間迄": w_end_str,
+                                "策略報酬%": round(strat_ret, 2), "買入持有%": round(bench_ret, 2),
+                                "超額報酬%": round(strat_ret - bench_ret, 2),
+                                "最大回撤%": round(mdd, 2), "交易次數": n_trades
+                            })
+                        except Exception:
+                            continue
+
+                    if not results:
+                        st.warning("所有測試區間都沒有產生有效結果，可能是資料不足。")
+                    else:
+                        df_results = pd.DataFrame(results)
+
+                        rets = df_results["策略報酬%"]
+                        win_windows = (rets > 0).sum()
+                        total_windows = len(rets)
+
+                        st.markdown("#### 📊 穩健度總覽")
+                        s1, s2, s3, s4, s5 = st.columns(5)
+                        s1.metric("測試區間數", f"{total_windows}")
+                        s2.metric("平均報酬率", f"{rets.mean():+.2f}%")
+                        s3.metric("報酬率標準差", f"{rets.std():.2f}%", help="數字越大代表結果隨區間變動越劇烈，策略越不穩健")
+                        s4.metric("正報酬區間佔比", f"{win_windows}/{total_windows} ({win_windows/total_windows*100:.0f}%)")
+                        s5.metric("最差區間", f"{rets.min():+.2f}%")
+
+                        if rets.std() > abs(rets.mean()):
+                            st.warning("⚠️ 報酬率標準差大於平均報酬率，代表結果對區間選擇很敏感，建議先別急著加大部位或調整參數去追單一張圖的績效，應優先降低這種波動。")
+                        else:
+                            st.success("✅ 平均報酬相對於區間間的波動來說是正的且不算小，穩健度尚可，但仍建議搭配不同標的多測幾次。")
+
+                        st.markdown("---")
+                        st.markdown("#### 📈 各區間報酬率分布")
+                        fig_dist = go.Figure()
+                        fig_dist.add_trace(go.Bar(
+                            x=df_results["區間起"], y=df_results["策略報酬%"], name="策略報酬%",
+                            marker_color=['#26a69a' if v >= 0 else '#ef5350' for v in df_results["策略報酬%"]]
+                        ))
+                        fig_dist.add_trace(go.Scatter(
+                            x=df_results["區間起"], y=df_results["買入持有%"], name="買入持有%",
+                            mode='lines+markers', line=dict(color='#B0BEC5', dash='dash')
+                        ))
+                        fig_dist.update_layout(
+                            title=f"{robust_symbol} 各滾動區間策略報酬 vs 買入持有",
+                            xaxis_title="區間起始日", yaxis_title="報酬率 (%)",
+                            template="plotly_white", height=400, hovermode="x unified"
+                        )
+                        st.plotly_chart(fig_dist, use_container_width=True)
+
+                        st.markdown("---")
+                        st.markdown("#### 📜 各區間詳細數據")
+                        st.dataframe(df_results, use_container_width=True, hide_index=True)
+
+            except Exception as ex:
+                st.error(f"執行穩健度測試失敗: {ex}")
