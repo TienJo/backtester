@@ -17,7 +17,7 @@ except ImportError:
     HAS_SORTABLES = False
 
 # ==========================================
-# 1. 多重備援行情數據引擎 (修正快取參數)
+# 1. 多重備援行情數據引擎
 # ==========================================
 class MultiSourceMarketData:
     def __init__(self):
@@ -196,7 +196,6 @@ class MultiSourceMarketData:
 
 data_engine = MultiSourceMarketData()
 
-# 正確快取：將所有查詢條件作為 Key，避免時間切換無效
 @st.cache_data(ttl=300)
 def cached_fetch_ohlc(symbol: str, start_date: str = None, end_date: str = None):
     return data_engine.fetch_ohlc(symbol, start_date, end_date)
@@ -318,32 +317,41 @@ class TradingStrategyEngine:
                 return metrics, [{"type": "info", "action_code": "COMPLETED", "title": "🟢 當前 K 線進場訊號已執行完畢", "desc": f"您已於 {last_trade_date} 完成此輪交易操作。請耐心等待新交易日。（目前持倉：{tranches_held*10:.0f}%）"}]
 
         if tranches_held > 0:
-            if temp > 95.0 and (price < yesterday_low or price < ma5):
-                return metrics, [{"type": "warning", "action_code": "SELL_ALL", "title": "🔥 策略建議：沸點反轉，一鍵逃頂", "desc": f"當前溫度極度超買 ({temp:.1f}°C)，且價格轉弱跌破 MA5/前低！判定高檔反轉，請立即全數清倉鎖定最大獲利。"}]
+            unrealized_pct = ((price - avg_cost) / avg_cost) * 100.0
+            
+            # 獲利 15% 減倉變現
+            if unrealized_pct >= 15.0 and tranches_held >= 5:
+                return metrics, [{"type": "success", "action_code": "SELL_HALF", "title": "💰 策略建議：獲利達 15%，減倉 50% 鎖定利潤", "desc": f"當前獲利達 {unrealized_pct:.1f}%，建議落袋為安，賣出一半持倉收回本金。"}]
 
+            # 沸點逃頂
+            if temp > 95.0 and (price < yesterday_low or price < ma5):
+                return metrics, [{"type": "warning", "action_code": "SELL_ALL", "title": "🔥 策略建議：沸點反轉，一鍵逃頂", "desc": f"當前溫度極度超買 ({temp:.1f}°C)，且價格跌破 MA5！清倉鎖定最大獲利。"}]
+
+            # 硬防守 8%
             hard_stop_price = avg_cost * 0.92
             if price <= hard_stop_price:
-                return metrics, [{"type": "error", "action_code": "STOP_LOSS", "title": "🚨 策略建議：跌穿成本 8%，絕對停損", "desc": f"當前淨值/價格 ({price:.2f}) 已跌破平均成本 8% 的絕對防守線 ({hard_stop_price:.2f})！請無條件全數斷頭出場，嚴格控制虧損。"}]
+                return metrics, [{"type": "error", "action_code": "STOP_LOSS", "title": "🚨 策略建議：跌穿成本 8%，絕對停損", "desc": f"已跌破成本 8% 防守線 ({hard_stop_price:.2f})！請無條件全數斷頭出場。"}]
             
-            if price < ma20 * 0.97:
-                return metrics, [{"type": "error", "action_code": "STOP_LOSS", "title": "⚠️ 策略建議：跌破月線防守，提早停損", "desc": f"實體跌破 MA20 生命線達 3%，中期趨勢已遭破壞，建議先行清倉觀望，保留資金實力。"}]
+            # 放寬 MA20 - 7%
+            if price < ma20 * 0.93:
+                return metrics, [{"type": "error", "action_code": "STOP_LOSS", "title": "⚠️ 策略建議：跌破 MA20 7%，防守停損", "desc": f"實體跌破 MA20 達 7%，中期趨勢轉弱，建議清倉離場。"}]
 
         if tranches_held == 0:
             if rsi_bullish_div and temp < 35.0:
-                return metrics, [{"type": "success", "action_code": "BUY_40", "title": "🎯 策略建議：【極寒抄底】投入 40% 資金", "desc": f"RSI 底背離確立，且系統處於冰點 (溫度 {temp:.1f}°C)！建議投入 40% 資金 (~${target_capital * 0.4:,.0f} 元，約 {target_shares_40:,} 股/份)。"}]
+                return metrics, [{"type": "success", "action_code": "BUY_40", "title": "🎯 策略建議：【極寒抄底】投入 40% 資金", "desc": f"RSI 底背離 (溫度 {temp:.1f}°C)！建議投入 40% 資金 (~${target_capital * 0.4:,.0f} 元)。"}]
             elif breakout_20_high and 35.0 <= temp <= 80.0:
-                return metrics, [{"type": "success", "action_code": "BUY_60", "title": "🚀 策略建議：【黃金突破】投入 60% 資金", "desc": f"強勢突破 20 日高點，動能充沛 (溫度 {temp:.1f}°C)！建議直接投入 60% 資金 (~${target_capital * 0.6:,.0f} 元，約 {target_shares_60:,} 股/份)。"}]
+                return metrics, [{"type": "success", "action_code": "BUY_60", "title": "🚀 策略建議：【黃金突破】投入 60% 資金", "desc": f"強勢突破 20 日高點 (溫度 {temp:.1f}°C)！建議投入 60% 資金 (~${target_capital * 0.6:,.0f} 元)。"}]
             else:
-                return metrics, [{"type": "info", "action_code": "HOLD", "title": "💤 策略建議：保留現金，耐心等待", "desc": f"當前溫度 {temp:.1f}°C，尚未出現【極寒抄底】或【黃金突破】訊號，請將 100% 資金保留為現金觀望。"}]
+                return metrics, [{"type": "info", "action_code": "HOLD", "title": "💤 策略建議：保留現金，耐心等待", "desc": f"當前溫度 {temp:.1f}°C，尚未出現進場訊號。"}]
         
         elif tranches_held > 0 and tranches_held < 9:
             if breakout_20_high and 35.0 <= temp <= 80.0:
-                return metrics, [{"type": "success", "action_code": "BUY_REMAIN", "title": "🚀 策略建議：【黃金突破】打滿剩餘資金", "desc": f"趨勢強勢表態 (溫度 {temp:.1f}°C)！建議將剩餘的 60% 資金全數打滿，完成主升段重倉佈局。"}]
+                return metrics, [{"type": "success", "action_code": "BUY_REMAIN", "title": "🚀 策略建議：【黃金突破】打滿剩餘資金", "desc": f"趨勢強勢表態！建議將剩餘資金全數打滿。"}]
             else:
-                return metrics, [{"type": "info", "action_code": "HOLD", "title": "🟢 策略建議：持股續抱，等待突破", "desc": f"目前持有部分底倉 (平均成本 {avg_cost:.2f})。未達 8% 停損與黃金突破條件，建議抱單觀望。"}]
+                return metrics, [{"type": "info", "action_code": "HOLD", "title": "🟢 策略建議：持股續抱，等待突破", "desc": f"目前持有部分底倉 (成本 {avg_cost:.2f})，抱單觀望。"}]
                 
         else:
-            return metrics, [{"type": "info", "action_code": "HOLD", "title": "🟢 策略建議：滿倉獲利奔跑中", "desc": f"目前已達 100% 滿倉狀態 (平均成本 {avg_cost:.2f})！系統已啟動【絕對 8% 停損】與【沸點反轉逃頂】監控，請安心讓利潤奔跑。"}]
+            return metrics, [{"type": "info", "action_code": "HOLD", "title": "🟢 策略建議：滿倉獲利奔跑中", "desc": f"目前滿倉中，系統已啟動減倉與防守監控。"}]
 
     @staticmethod
     def audit_post_trade(action_type: str, trade_price: float, trade_shares: int, pre_signals: list[dict], pre_pos: dict, metrics: dict) -> tuple[list[dict], list[dict]]:
@@ -356,46 +364,45 @@ class TradingStrategyEngine:
 
         if action_type in ["BUY", "ADD"]:
             if pre_tranches >= 9:
-                audit_items.append({"level": "error", "title": "❌ 嚴重違規：突破 100% 滿倉上限", "detail": "您已處於滿倉狀態，禁止繼續借貸或動用額外資金追高買進。"})
+                audit_items.append({"level": "error", "title": "❌ 嚴重違規：突破 100% 滿倉上限", "detail": "您已處於滿倉狀態，禁止繼續加碼。"})
             elif any(code in ['BUY_40', 'BUY_60', 'BUY_REMAIN'] for code in advised_codes):
-                audit_items.append({"level": "success", "title": "✅ 依策略建議合規【精準重倉】", "detail": "您的買進完美契合【極寒抄底】或【黃金突破】的高勝率買點。"})
+                audit_items.append({"level": "success", "title": "✅ 依策略建議合規【精準重倉】", "detail": "買進完美契合極寒抄底或黃金突破。"})
             else:
-                audit_items.append({"level": "warning", "title": "⚠️ 頻繁進出：非策略性盲目買進", "detail": "當日並未出現明確的兩步建倉訊號，此操作將產生無謂的手續費與滑價風險。"})
+                audit_items.append({"level": "warning", "title": "⚠️ 頻繁進出：非策略性盲目買進", "detail": "當日無明確建倉訊號。"})
 
         elif action_type == "SELL":
-            if any(code in ['STOP_LOSS', 'SELL_ALL'] for code in advised_codes):
-                audit_items.append({"level": "success", "title": "💯 嚴格風控：果斷執行逃頂或斷頭", "detail": "成功切斷虧損或於高檔鎖定利潤，完美落實交易紀律。"})
+            if any(code in ['STOP_LOSS', 'SELL_ALL', 'SELL_HALF'] for code in advised_codes):
+                audit_items.append({"level": "success", "title": "💯 嚴格風控：果斷減倉獲利或避險", "detail": "成功鎖定利潤或落實停損紀律。"})
             else:
-                audit_items.append({"level": "warning", "title": "⚠️ 過早離場：未達出場標準", "detail": "趨勢尚未破壞，亦未達 8% 停損線，提前賣出可能錯失主升段大行情。"})
+                audit_items.append({"level": "warning", "title": "⚠️ 過早離場：未達減倉或出場標準", "detail": "趨勢未破壞且未達 15% 減倉目標。"})
 
         elif action_type == "NONE":
             if any(code in ['STOP_LOSS', 'SELL_ALL'] for code in advised_codes):
-                audit_items.append({"level": "error", "title": "🚨 致命錯誤：抗單未停損 / 高檔未逃頂", "detail": "已跌破 8% 絕對死亡線或高檔沸點反轉，未賣出將面臨毀滅性虧損！"})
+                audit_items.append({"level": "error", "title": "🚨 致命錯誤：抗單未停損 / 高檔未逃頂", "detail": "已達防守線未賣出，可能面臨大幅回撤！"})
             else:
-                audit_items.append({"level": "success", "title": "💯 紀律抱單：無效震盪不動作", "detail": "當日無操作，完美規避了頻繁交易產生的摩擦成本，展現極高抱單定力。"})
+                audit_items.append({"level": "success", "title": "💯 紀律抱單：無效震盪不動作", "detail": "當日無操作，規避頻繁交易摩擦成本。"})
 
         ma20 = metrics['MA20']
         high_20 = metrics['High_20']
         
         if avg_cost > 0:
             hard_stop = avg_cost * 0.92
-            watchlist_items.append({"title": "💀 絕對 8% 斷頭防守線", "value": f"{hard_stop:.4f}", "desc": f"只要收盤價跌破平均成本的 8% ({hard_stop:.4f})，請立刻無條件全數賣出！"})
+            take_profit = avg_cost * 1.15
+            watchlist_items.append({"title": "💰 15% 減倉鎖利觸發價", "value": f"{take_profit:.4f}", "desc": "達到此價格自動賣出 50% 部位，收回本金。"})
+            watchlist_items.append({"title": "💀 絕對 8% 斷頭防守線", "value": f"{hard_stop:.4f}", "desc": "跌破此價位無條件全數清倉。"})
         
-        watchlist_items.append({"title": "🛡️ 技術均線止損價 (MA20 - 3%)", "value": f"{(ma20 * 0.97):.4f}", "desc": "價格跌穿此處表示中期趨勢破壞，提早認錯出場。"})
-        watchlist_items.append({"title": "🚀 強勢突破觸發價 (20日高價)", "value": f"{high_20:.4f}", "desc": "若帶量突破此價位，即刻觸發 60% 資金的黃金突破重倉點。"})
+        watchlist_items.append({"title": "🛡️ 寬鬆月線止損價 (MA20 - 7%)", "value": f"{(ma20 * 0.93):.4f}", "desc": "跌穿此處表示中期趨勢徹底破壞。"})
+        watchlist_items.append({"title": "🚀 強勢突破觸發價 (20日高價)", "value": f"{high_20:.4f}", "desc": "帶量突破觸發黃金突破重倉點。"})
         
         return audit_items, watchlist_items
 
 
 # ==========================================
-# 3. 歷史回測引擎 (修復重複當沖買賣與時間截取Bug)
+# 3. 歷史回測引擎 (含15%止盈與MA20-7%寬防守)
 # ==========================================
 class StrategyBacktester:
     def __init__(self, df: pd.DataFrame, initial_capital: float = 200000.0, start_date: str = None, end_date: str = None):
-        # 先計算好全量數據的技術指標
         df_calc = TradingStrategyEngine.calculate_indicators(df)
-        
-        # 截取用戶指定的歷史區間進行回測（確保包含前面60天計算指標）
         if start_date and end_date:
             self.df = df_calc.loc[start_date:end_date]
         else:
@@ -408,12 +415,13 @@ class StrategyBacktester:
         cash = self.initial_capital
         shares = 0
         avg_cost = 0.0
+        took_profit = False  # 標記是否已進行過 15% 減倉
         
         trades = []
         equity_curve = []
         
         for i in range(len(df)):
-            if i < 10:  # 確保有足夠的前10天資料計算背離
+            if i < 10:
                 continue
                 
             date = df.index[i]
@@ -441,12 +449,27 @@ class StrategyBacktester:
             rsi_not_low_10 = rsi14 > prev_10['RSI14'].min()
             rsi_bullish_div = price_low_10 and rsi_not_low_10 and (rsi14 < 45)
             
-            # 1. 出場清倉機制 (賣出後必須 continue，防止當天被立刻買回)
+            # 1. 減倉與清倉機制
             sold_today = False
             if shares > 0:
                 hard_stop_price = avg_cost * 0.92
-                
-                # 沸點逃頂
+                unrealized_pct = ((price - avg_cost) / avg_cost) * 100.0
+
+                # A. 獲利達 15% 減倉 50% 變現
+                if unrealized_pct >= 15.0 and not took_profit:
+                    sell_shares = int(shares * 0.5)
+                    if sell_shares > 0:
+                        sell_amount = sell_shares * price
+                        pnl = sell_amount - (sell_shares * avg_cost)
+                        cash += sell_amount
+                        shares -= sell_shares
+                        took_profit = True
+                        trades.append({
+                            "日期": date_str, "動作": "減倉50%", "原因": "💰 獲利達15%鎖利", 
+                            "成交價": price, "股數": sell_shares, "損益": pnl, "報酬率": f"{unrealized_pct:+.2f}%", "剩餘現金": cash
+                        })
+
+                # B. 沸點逃頂 (清倉)
                 if temp > 95.0 and (price < yesterday_low or price < ma5):
                     sell_amount = shares * price
                     pnl = sell_amount - (shares * avg_cost)
@@ -458,9 +481,10 @@ class StrategyBacktester:
                     })
                     shares = 0
                     avg_cost = 0.0
+                    took_profit = False
                     sold_today = True
                     
-                # 8% 絕對停損
+                # C. 8% 絕對停損 (清倉)
                 elif price <= hard_stop_price:
                     sell_amount = shares * price
                     pnl = sell_amount - (shares * avg_cost)
@@ -472,23 +496,24 @@ class StrategyBacktester:
                     })
                     shares = 0
                     avg_cost = 0.0
+                    took_profit = False
                     sold_today = True
                     
-                # 月線破位停損
-                elif price < ma20 * 0.97:
+                # D. 寬鬆 MA20 - 7% 停損 (清倉)
+                elif price < ma20 * 0.93:
                     sell_amount = shares * price
                     pnl = sell_amount - (shares * avg_cost)
                     pnl_pct = (pnl / (shares * avg_cost)) * 100
                     cash += sell_amount
                     trades.append({
-                        "日期": date_str, "動作": "停損出場", "原因": "⚠️ 跌破 MA20 3%", 
+                        "日期": date_str, "動作": "停損出場", "原因": "⚠️ 跌破 MA20 7%", 
                         "成交價": price, "股數": shares, "損益": pnl, "報酬率": f"{pnl_pct:+.2f}%", "剩餘現金": cash
                     })
                     shares = 0
                     avg_cost = 0.0
+                    took_profit = False
                     sold_today = True
 
-            # 若今日已賣出，直接進入下一天，防止當天剛賣完立刻又符合進場條件買回
             if sold_today:
                 current_portfolio_value = cash
                 benchmark_value = (self.initial_capital / df.iloc[0]['Close']) * price
@@ -499,7 +524,7 @@ class StrategyBacktester:
                 })
                 continue
 
-            # 2. 進場建倉與加倉檢查
+            # 2. 進場與加倉
             if shares == 0:
                 if rsi_bullish_div and temp < 35.0:
                     buy_budget = self.initial_capital * 0.4
@@ -509,6 +534,7 @@ class StrategyBacktester:
                         cash -= cost
                         shares = buy_shares
                         avg_cost = price
+                        took_profit = False
                         trades.append({
                             "日期": date_str, "動作": "建倉(40%)", "原因": "🎯 極寒抄底", 
                             "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%", "剩餘現金": cash
@@ -521,12 +547,13 @@ class StrategyBacktester:
                         cash -= cost
                         shares = buy_shares
                         avg_cost = price
+                        took_profit = False
                         trades.append({
                             "日期": date_str, "動作": "建倉(60%)", "原因": "🚀 黃金突破", 
                             "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%", "剩餘現金": cash
                         })
 
-            elif shares > 0 and cash > (self.initial_capital * 0.1):
+            elif shares > 0 and cash > (self.initial_capital * 0.1) and not took_profit:
                 if breakout_20_high and 35.0 <= temp <= 80.0:
                     buy_shares = int(cash / price)
                     if buy_shares > 0:
@@ -674,7 +701,6 @@ db = st.session_state.db
 db.setdefault("stocks", {})
 db.setdefault("stock_order", list(db["stocks"].keys()))
 
-# ----------------- 側邊欄設定 -----------------
 st.sidebar.title("⚙️ 戰情控制面板")
 
 stock_keys = [k for k in db.get("stock_order", []) if k in db["stocks"]]
@@ -769,8 +795,7 @@ if db.get("stocks"):
         st.sidebar.success(f"已刪除 {del_sym}")
         st.rerun()
 
-# ----------------- 右側主頁面 -----------------
-st.title("📈 動態溫控主升段最大化 App (滿倉八趴防守版)")
+st.title("📈 動態溫控主升段最大化 App (分段止盈八趴防守版)")
 
 if not active_stock or active_stock not in db["stocks"]:
     st.info("請先在左側邊欄新增自選標的。")
@@ -848,7 +873,7 @@ with tab1:
             with col_f3:
                 trade_shares = st.number_input("成交數量 (股/份)", min_value=0, value=1000, step=100, disabled=is_weekend)
 
-            trade_note = st.text_input("交易備註 (選填，例如：黃金突破重倉打滿)", "", disabled=is_weekend)
+            trade_note = st.text_input("交易備註 (選填，例如：獲利15%先減倉一半)", "", disabled=is_weekend)
             submit_trade = st.form_submit_button("💾 記錄交易並進行二次合規分析", type="primary", disabled=is_weekend)
 
             if submit_trade and not is_weekend:
@@ -908,10 +933,12 @@ with tab1:
                     st.error(f"**{item['title']}**\n\n{item['detail']}")
 
         with c_watch:
-            st.markdown("#### 📌 短線重要防守與進攻價位")
+            st.markdown("#### 📌 短線重要防守與獲利價位")
             for item in watchlist_results:
                 if "💀" in item['title']:
                     st.error(f"**{item['title']}**: `{item['value']}`\n\n↳ {item['desc']}")
+                elif "💰" in item['title']:
+                    st.success(f"**{item['title']}**: `{item['value']}`\n\n↳ {item['desc']}")
                 else:
                     st.info(f"**{item['title']}**: `{item['value']}`\n\n↳ {item['desc']}")
 
@@ -1072,10 +1099,10 @@ with tab4:
                     health_alerts.append(f"💀 **{s_info['name']} ({sym_k})**：已跌破成本 8%，請務必即刻斷頭清倉！")
                     score -= 20
                     stock_status = "💀 觸及 8% 斷頭線"
-                elif pos['total_shares'] > 0 and curr_price < ma20 * 0.97:
-                    health_alerts.append(f"🚨 **{s_info['name']} ({sym_k})**：已跌破 MA20 防守線 3%，中期轉弱建議出場！")
+                elif pos['total_shares'] > 0 and curr_price < ma20 * 0.93:
+                    health_alerts.append(f"🚨 **{s_info['name']} ({sym_k})**：已跌破 MA20 防守線 7%，中期轉弱建議出場！")
                     score -= 10
-                    stock_status = "🚨 跌破月線防守"
+                    stock_status = "🚨 跌破月線防守(7%)"
 
                 if pos['tranches_held'] > 10:
                     health_alerts.append(f"⚠️ **{s_info['name']} ({sym_k})**：當前持倉已破 100% 滿倉上限！")
@@ -1147,12 +1174,10 @@ with tab4:
     with sub_tab_cn:
         render_market_analysis(cn_stocks, "RMB ¥", "陸股/基金")
 
-# ==========================================
-# Tab 5: 歷史區間回測 (精準時間切割與邏輯修復)
-# ==========================================
+# Tab 5: 歷史區間回測
 with tab5:
     st.markdown("### 📜 個股歷史策略模擬與回測系統")
-    st.caption("請選擇回測區間並按下按鈕，系統將自動進行精準模擬。")
+    st.caption("已整合【獲利15%減倉50%】與【MA20-7%寬鬆止損】邏輯。請選擇回測區間並按下按鈕執行模擬。")
 
     col_bt1, col_bt2, col_bt3 = st.columns([2, 2, 2])
     with col_bt1:
@@ -1178,14 +1203,12 @@ with tab5:
 
         with st.spinner(f"正在擷取 {bt_symbol} 行情數據與執行回測..."):
             try:
-                # 為了確保技術指標（如MA60）計算準確，向前多抓60天數據
                 fetch_start = (bt_start - timedelta(days=120)).strftime("%Y-%m-%d")
                 df_bt_raw, src_bt = cached_fetch_ohlc(bt_symbol, start_date=fetch_start, end_date=end_str)
                 
                 if df_bt_raw.empty or len(df_bt_raw) < 30:
                     st.error("歷史數據不足，無法執行回測。請確認代碼或重新選擇區間。")
                 else:
-                    # 執行精準時間區間回測
                     backtester = StrategyBacktester(df_bt_raw, initial_capital=bt_capital, start_date=start_str, end_date=end_str)
                     df_equity, df_trades = backtester.run()
 
@@ -1198,15 +1221,13 @@ with tab5:
                         strat_return = ((final_strat_val - bt_capital) / bt_capital) * 100.0
                         bench_return = ((final_bench_val - bt_capital) / bt_capital) * 100.0
 
-                        # MDD 計算
                         equity_series = df_equity["策略資產淨值"]
                         cummax = equity_series.cummax()
                         drawdown = (equity_series - cummax) / cummax
                         max_drawdown = drawdown.min() * 100.0 if not drawdown.empty else 0.0
 
-                        # 出場交易勝率
-                        if not df_trades.empty and ("全數賣出" in df_trades["動作"].values or "停損出場" in df_trades["動作"].values):
-                            closed_trades = df_trades[df_trades["動作"].isin(["全數賣出", "停損出場"])]
+                        if not df_trades.empty and any(act in df_trades["動作"].values for act in ["全數賣出", "停損出場", "減倉50%"]):
+                            closed_trades = df_trades[df_trades["動作"].isin(["全數賣出", "停損出場", "減倉50%"])]
                             win_count = len(closed_trades[closed_trades["損益"] > 0])
                             total_closed = len(closed_trades)
                             win_rate = (win_count / total_closed * 100.0) if total_closed > 0 else 0.0
@@ -1222,7 +1243,7 @@ with tab5:
                         b2.metric("策略總累積報酬率", f"{strat_return:+.2f}%", delta=f"{strat_return - bench_return:+.2f}% vs 基準")
                         b3.metric("買入持有 (Benchmark)", f"{bench_return:+.2f}%")
                         b4.metric("最大資產回撤 (MDD)", f"{max_drawdown:.2f}%")
-                        b5.metric("出場勝率", f"{win_rate:.1f}%", f"共 {total_closed} 次出場")
+                        b5.metric("出場/減倉勝率", f"{win_rate:.1f}%", f"共 {total_closed} 次操作")
 
                         st.markdown("---")
                         st.markdown("#### 📈 資產淨值成長曲線 vs 買入持有對照")
