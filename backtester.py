@@ -502,27 +502,36 @@ class StrategyBacktester:
                                 "當下倉位": f"{shares:,} 股 ({pos_pct:.1f}%)", "剩餘現金": round(cash, 2)
                             })
 
-                    # 📈 方式 B：右側強勢突破 (直上 50% 重倉，不浪費起漲點)
-                    elif price > ma20 and (ma5 > ma10) and is_bullish_candle:
-                        buy_budget = self.initial_capital * 0.50
-                        buy_shares = int(buy_budget / price)
-                        if buy_shares > 0 and cash >= buy_shares * price:
-                            cost = buy_shares * price
-                            cash -= cost
-                            shares = buy_shares
-                            avg_cost = price
-                            last_add_price = price
-                            highest_price_since_entry = price
-                            took_profit_15 = False
-                            took_atr_profit = False
-                            has_crossed_ma20 = True
+                    # 📈 方式 B：右側強勢突破 (加入 MA20 翻揚與 5日新高濾網)
+elif price > ma20 and (ma5 > ma10) and is_bullish_candle:
+    
+    # 🛡️ 關鍵防洗濾網：
+    # 1. MA20 必須是平走或向上翻揚 (ma20 >= yesterday_ma20)
+    # 2. 收盤價必須創近 5 日新高，確保不是震盪插針
+    ma20_turning_up = ma20 >= yesterday_ma20
+    is_5d_high = price >= prev_10['Close'].iloc[-5:].max()
 
-                            curr_val = cash + (shares * price)
-                            pos_pct = (shares * price / curr_val * 100) if curr_val > 0 else 0
-                            trades.append({
-                                "Date": date, "日期": date_str, "動作": "建倉(50%)", "類別": "Buy", "原因": "🚀 右側強勢突破重倉 (站上MA20+MA5>MA10)", 
-                                "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%", 
-                                "當下倉位": f"{shares:,} 股 ({pos_pct:.1f}%)", "剩餘現金": round(cash, 2)
+    if ma20_turning_up and is_5d_high:
+        buy_budget = self.initial_capital * 0.30  # 先用 30% 試錯，避免追高全下
+        buy_shares = int(buy_budget / price)
+        if buy_shares > 0 and cash >= buy_shares * price:
+            cost = buy_shares * price
+            cash -= cost
+            shares = buy_shares
+            avg_cost = price
+            last_add_price = price
+            highest_price_since_entry = price
+            took_profit_15 = False
+            took_atr_profit = False
+            has_crossed_ma20 = True
+
+            curr_val = cash + (shares * price)
+            pos_pct = (shares * price / curr_val * 100) if curr_val > 0 else 0
+            trades.append({
+                "Date": date, "日期": date_str, "動作": "建倉(30%)", "類別": "Buy", "原因": "🚀 右側突破 (MA20翻揚+創5日新高)", 
+                "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%", 
+                "當下倉位": f"{shares:,} 股 ({pos_pct:.1f}%)", "剩餘現金": round(cash, 2)
+            })
                             })
 
                 # 加碼邏輯 (已持股時快加碼)
