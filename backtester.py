@@ -17,7 +17,7 @@ except ImportError:
     HAS_SORTABLES = False
 
 # ==========================================
-# 1. 多重備援行情數據引擎 (支援歷史區間抓取)
+# 1. 多重備援行情數據引擎 (加入快取機制避免卡頓)
 # ==========================================
 class MultiSourceMarketData:
     def __init__(self):
@@ -194,6 +194,12 @@ class MultiSourceMarketData:
 
         return pd.DataFrame()
 
+data_engine = MultiSourceMarketData()
+
+# 快取數據抓取，避免每次操作都卡頓
+@st.cache_data(ttl=300)
+def cached_fetch_ohlc(symbol: str, start_date: str = None, end_date: str = None):
+    return data_engine.fetch_ohlc(symbol, start_date, end_date)
 
 # ==========================================
 # 2. 動態溫控主升段最大化策略引擎
@@ -382,7 +388,7 @@ class TradingStrategyEngine:
 
 
 # ==========================================
-# 3. 歷史回測引擎 (Backtesting Engine)
+# 3. 歷史回測引擎
 # ==========================================
 class StrategyBacktester:
     def __init__(self, df: pd.DataFrame, initial_capital: float = 200000.0):
@@ -398,7 +404,6 @@ class StrategyBacktester:
         trades = []
         equity_curve = []
         
-        # 從第 60 根 K 線開始回測（確保均線與指標已算完）
         for i in range(60, len(df)):
             date = df.index[i]
             date_str = date.strftime("%Y-%m-%d")
@@ -429,7 +434,6 @@ class StrategyBacktester:
             if shares > 0:
                 hard_stop_price = avg_cost * 0.92
                 
-                # 沸點逃頂
                 if temp > 95.0 and (price < yesterday_low or price < ma5):
                     sell_amount = shares * price
                     pnl = sell_amount - (shares * avg_cost)
@@ -442,7 +446,6 @@ class StrategyBacktester:
                     shares = 0
                     avg_cost = 0.0
                     
-                # 8% 絕對停損
                 elif price <= hard_stop_price:
                     sell_amount = shares * price
                     pnl = sell_amount - (shares * avg_cost)
@@ -455,7 +458,6 @@ class StrategyBacktester:
                     shares = 0
                     avg_cost = 0.0
                     
-                # 月線破位停損
                 elif price < ma20 * 0.97:
                     sell_amount = shares * price
                     pnl = sell_amount - (shares * avg_cost)
@@ -643,8 +645,6 @@ db = st.session_state.db
 db.setdefault("stocks", {})
 db.setdefault("stock_order", list(db["stocks"].keys()))
 
-data_engine = MultiSourceMarketData()
-
 # ----------------- 側邊欄設定 -----------------
 st.sidebar.title("⚙️ 戰情控制面板")
 
@@ -758,138 +758,136 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📜 歷史區間回測"
 ])
 
-with st.spinner(f"正在擷取 {stock_info['name']} 最新行情數據與計算溫度..."):
-    try:
-        df_kline, source_used = data_engine.fetch_ohlc(stock_info['symbol'])
-        pos_summary = compute_position_summary(stock_info.get('trades', []), df_kline.iloc[-1]['Close'], stock_target_capital)
-        metrics, pre_signals = TradingStrategyEngine.evaluate_pre_trade_advice(df_kline, stock_info, pos_summary, stock_target_capital)
-    except Exception as e:
-        st.error(f"行情擷取失敗: {e}")
-        st.stop()
-
 # Tab 1: 主介面
 with tab1:
     col_t1, col_t2 = st.columns([3, 1])
     with col_t1:
         st.subheader(f"{stock_info['name']} ({stock_info['symbol']})")
-    with col_t2:
-        st.caption(f"🟢 行情來源: {source_used}")
 
-    m1, m2, m3, m4, m5, m6 = st.columns(6)
-    with m1:
-        st.metric("最新價/淨值", f"{metrics['Close']:.4f}" if metrics['Close'] < 10 else f"{metrics['Close']:.2f}")
-        st.caption(f"🕒 更新時間：{metrics.get('KLine_Date', '最新交易日')} (盤中延遲)")
-    
-    temp_val = metrics['Temperature']
-    temp_color = "🔥" if temp_val > 95 else ("🌡️" if temp_val >= 35 else "❄️")
-    m2.metric("標的動態溫度", f"{temp_color} {temp_val:.1f}°C")
-    
-    m3.metric("持倉配置進度", f"{pos_summary['tranches_held']*10:.0f}% / 100%")
-    m4.metric("平均持倉成本", f"{pos_summary['avg_cost']:.4f}" if pos_summary['avg_cost'] < 10 else f"{pos_summary['avg_cost']:.2f}" if pos_summary['total_shares'] > 0 else "未開倉")
-    u_pnl_pct = (pos_summary['unrealized_pnl'] / pos_summary['total_cost'] * 100.0) if pos_summary['total_cost'] > 0 else 0.0
-    m5.metric("未實現損益", f"${pos_summary['unrealized_pnl']:,.0f}", delta=f"{u_pnl_pct:.2f}%" if pos_summary['total_shares'] > 0 else "0%")
-    m6.metric("持有總份額", f"{pos_summary['total_shares']:,}")
+    try:
+        df_kline, source_used = cached_fetch_ohlc(stock_info['symbol'])
+        col_t2.caption(f"🟢 行情來源: {source_used}")
+        pos_summary = compute_position_summary(stock_info.get('trades', []), df_kline.iloc[-1]['Close'], stock_target_capital)
+        metrics, pre_signals = TradingStrategyEngine.evaluate_pre_trade_advice(df_kline, stock_info, pos_summary, stock_target_capital)
 
-    st.markdown("---")
+        m1, m2, m3, m4, m5, m6 = st.columns(6)
+        with m1:
+            st.metric("最新價/淨值", f"{metrics['Close']:.4f}" if metrics['Close'] < 10 else f"{metrics['Close']:.2f}")
+            st.caption(f"🕒 更新時間：{metrics.get('KLine_Date', '最新交易日')} (盤中延遲)")
+        
+        temp_val = metrics['Temperature']
+        temp_color = "🔥" if temp_val > 95 else ("🌡️" if temp_val >= 35 else "❄️")
+        m2.metric("標的動態溫度", f"{temp_color} {temp_val:.1f}°C")
+        
+        m3.metric("持倉配置進度", f"{pos_summary['tranches_held']*10:.0f}% / 100%")
+        m4.metric("平均持倉成本", f"{pos_summary['avg_cost']:.4f}" if pos_summary['avg_cost'] < 10 else f"{pos_summary['avg_cost']:.2f}" if pos_summary['total_shares'] > 0 else "未開倉")
+        u_pnl_pct = (pos_summary['unrealized_pnl'] / pos_summary['total_cost'] * 100.0) if pos_summary['total_cost'] > 0 else 0.0
+        m5.metric("未實現損益", f"${pos_summary['unrealized_pnl']:,.0f}", delta=f"{u_pnl_pct:.2f}%" if pos_summary['total_shares'] > 0 else "0%")
+        m6.metric("持有總份額", f"{pos_summary['total_shares']:,}")
 
-    today_date_str = datetime.now().strftime("%Y-%m-%d")
-    is_weekend = datetime.now().weekday() >= 5
-    last_op_date = stock_info.get("last_operated_date", "")
+        st.markdown("---")
 
-    if is_weekend:
-        st.info("☕ **今天為週末休市時間 (股市休市)**\n行情暫停更新，系統已自動鎖定進場建議與表單填寫。請於下一個交易日開盤後再進行對帳。")
-    elif last_op_date == today_date_str:
-        st.success(f"### ✅ 今日 ({today_date_str}) 操作已完成並寫入數據庫\n系統已記錄今日交易對帳。在下一交易日開盤新 K 線產生前，將不再重複顯示買賣建議。")
-    else:
-        st.markdown("### 🎯 第一次分析：主升段溫控進場指引")
-        for sig in pre_signals:
-            if sig['type'] == 'success':
-                st.success(f"**{sig['title']}**\n\n{sig['desc']}")
-            elif sig['type'] == 'warning':
-                st.warning(f"**{sig['title']}**\n\n{sig['desc']}")
-            elif sig['type'] == 'error':
-                st.error(f"**{sig['title']}**\n\n{sig['desc']}")
-            else:
-                st.info(f"**{sig['title']}**\n\n{sig['desc']}")
+        today_date_str = datetime.now().strftime("%Y-%m-%d")
+        is_weekend = datetime.now().weekday() >= 5
+        last_op_date = stock_info.get("last_operated_date", "")
 
-    st.markdown("---")
+        if is_weekend:
+            st.info("☕ **今天為週末休市時間 (股市休市)**\n行情暫停更新，系統已自動鎖定進場建議與表單填寫。請於下一個交易日開盤後再進行對帳。")
+        elif last_op_date == today_date_str:
+            st.success(f"### ✅ 今日 ({today_date_str}) 操作已完成並寫入數據庫\n系統已記錄今日交易對帳。在下一交易日開盤新 K 線產生前，將不再重複顯示買賣建議。")
+        else:
+            st.markdown("### 🎯 第一次分析：主升段溫控進場指引")
+            for sig in pre_signals:
+                if sig['type'] == 'success':
+                    st.success(f"**{sig['title']}**\n\n{sig['desc']}")
+                elif sig['type'] == 'warning':
+                    st.warning(f"**{sig['title']}**\n\n{sig['desc']}")
+                elif sig['type'] == 'error':
+                    st.error(f"**{sig['title']}**\n\n{sig['desc']}")
+                else:
+                    st.info(f"**{sig['title']}**\n\n{sig['desc']}")
 
-    st.markdown("### ✏️ 紀錄今日實際執行之交易")
-    with st.form("daily_trade_form"):
-        col_f1, col_f2, col_f3 = st.columns(3)
-        with col_f1:
-            action_choice = st.selectbox("當日操作類型", ["今日無操作 / 續抱", "買進 / 加倉", "賣出 / 減倉"], disabled=is_weekend)
-        with col_f2:
-            trade_price = st.number_input("成交單價/淨值", min_value=0.0, value=float(metrics['Close']), format="%.4f", disabled=is_weekend)
-        with col_f3:
-            trade_shares = st.number_input("成交數量 (股/份)", min_value=0, value=1000, step=100, disabled=is_weekend)
+        st.markdown("---")
 
-        trade_note = st.text_input("交易備註 (選填，例如：黃金突破重倉打滿)", "", disabled=is_weekend)
-        submit_trade = st.form_submit_button("💾 記錄交易並進行二次合規分析", type="primary", disabled=is_weekend)
+        st.markdown("### ✏️ 紀錄今日實際執行之交易")
+        with st.form("daily_trade_form"):
+            col_f1, col_f2, col_f3 = st.columns(3)
+            with col_f1:
+                action_choice = st.selectbox("當日操作類型", ["今日無操作 / 續抱", "買進 / 加倉", "賣出 / 減倉"], disabled=is_weekend)
+            with col_f2:
+                trade_price = st.number_input("成交單價/淨值", min_value=0.0, value=float(metrics['Close']), format="%.4f", disabled=is_weekend)
+            with col_f3:
+                trade_shares = st.number_input("成交數量 (股/份)", min_value=0, value=1000, step=100, disabled=is_weekend)
 
-        if submit_trade and not is_weekend:
-            if action_choice != "今日無操作 / 續抱" and trade_shares > 0:
-                t_type = "BUY" if "買進" in action_choice or "加倉" in action_choice else "SELL"
-                new_trade = {
-                    "date": today_date_str, "type": t_type, "price": trade_price,
-                    "shares": trade_shares, "note": trade_note
-                }
-                stock_info.setdefault("trades", []).append(new_trade)
-                stock_info["last_operated_date"] = today_date_str
-                save_db(db)
-                st.session_state[f"last_action_{active_stock}"] = t_type
-                st.session_state[f"last_price_{active_stock}"] = trade_price
-                st.session_state[f"last_shares_{active_stock}"] = trade_shares
-            else:
-                stock_info["last_operated_date"] = today_date_str
-                save_db(db)
-                st.session_state[f"last_action_{active_stock}"] = "NONE"
-                st.session_state[f"last_price_{active_stock}"] = metrics['Close']
-                st.session_state[f"last_shares_{active_stock}"] = 0
-            st.rerun()
+            trade_note = st.text_input("交易備註 (選填，例如：黃金突破重倉打滿)", "", disabled=is_weekend)
+            submit_trade = st.form_submit_button("💾 記錄交易並進行二次合規分析", type="primary", disabled=is_weekend)
 
-    st.markdown("### 🔍 第二次分析：交易紀律回測與防守價位")
+            if submit_trade and not is_weekend:
+                if action_choice != "今日無操作 / 續抱" and trade_shares > 0:
+                    t_type = "BUY" if "買進" in action_choice or "加倉" in action_choice else "SELL"
+                    new_trade = {
+                        "date": today_date_str, "type": t_type, "price": trade_price,
+                        "shares": trade_shares, "note": trade_note
+                    }
+                    stock_info.setdefault("trades", []).append(new_trade)
+                    stock_info["last_operated_date"] = today_date_str
+                    save_db(db)
+                    st.session_state[f"last_action_{active_stock}"] = t_type
+                    st.session_state[f"last_price_{active_stock}"] = trade_price
+                    st.session_state[f"last_shares_{active_stock}"] = trade_shares
+                else:
+                    stock_info["last_operated_date"] = today_date_str
+                    save_db(db)
+                    st.session_state[f"last_action_{active_stock}"] = "NONE"
+                    st.session_state[f"last_price_{active_stock}"] = metrics['Close']
+                    st.session_state[f"last_shares_{active_stock}"] = 0
+                st.rerun()
 
-    stock_action_key = f"last_action_{active_stock}"
-    stock_price_key = f"last_price_{active_stock}"
-    stock_shares_key = f"last_shares_{active_stock}"
+        st.markdown("### 🔍 第二次分析：交易紀律回測與防守價位")
 
-    last_act = st.session_state.get(stock_action_key, "NONE")
-    last_p = st.session_state.get(stock_price_key, metrics['Close'])
-    last_s = st.session_state.get(stock_shares_key, 0)
+        stock_action_key = f"last_action_{active_stock}"
+        stock_price_key = f"last_price_{active_stock}"
+        stock_shares_key = f"last_shares_{active_stock}"
 
-    trades_list = stock_info.get("trades", [])
-    if last_act != "NONE" and trades_list:
-        trades_before = trades_list[:-1]
-        pos_summary_before = compute_position_summary(trades_before, metrics['Close'], stock_target_capital)
-        _, pre_signals_before = TradingStrategyEngine.evaluate_pre_trade_advice(df_kline, stock_info, pos_summary_before, stock_target_capital)
-    else:
-        pos_summary_before = pos_summary
-        pre_signals_before = pre_signals
+        last_act = st.session_state.get(stock_action_key, "NONE")
+        last_p = st.session_state.get(stock_price_key, metrics['Close'])
+        last_s = st.session_state.get(stock_shares_key, 0)
 
-    audit_results, watchlist_results = TradingStrategyEngine.audit_post_trade(
-        last_act, last_p, last_s, pre_signals_before, pos_summary_before, metrics
-    )
+        trades_list = stock_info.get("trades", [])
+        if last_act != "NONE" and trades_list:
+            trades_before = trades_list[:-1]
+            pos_summary_before = compute_position_summary(trades_before, metrics['Close'], stock_target_capital)
+            _, pre_signals_before = TradingStrategyEngine.evaluate_pre_trade_advice(df_kline, stock_info, pos_summary_before, stock_target_capital)
+        else:
+            pos_summary_before = pos_summary
+            pre_signals_before = pre_signals
 
-    c_audit, c_watch = st.columns([1, 1])
+        audit_results, watchlist_results = TradingStrategyEngine.audit_post_trade(
+            last_act, last_p, last_s, pre_signals_before, pos_summary_before, metrics
+        )
 
-    with c_audit:
-        st.markdown("#### 💯 今日紀律合規診斷")
-        for item in audit_results:
-            if item['level'] == 'success':
-                st.success(f"**{item['title']}**\n\n{item['detail']}")
-            elif item['level'] == 'warning':
-                st.warning(f"**{item['title']}**\n\n{item['detail']}")
-            else:
-                st.error(f"**{item['title']}**\n\n{item['detail']}")
+        c_audit, c_watch = st.columns([1, 1])
 
-    with c_watch:
-        st.markdown("#### 📌 短線重要防守與進攻價位")
-        for item in watchlist_results:
-            if "💀" in item['title']:
-                st.error(f"**{item['title']}**: `{item['value']}`\n\n↳ {item['desc']}")
-            else:
-                st.info(f"**{item['title']}**: `{item['value']}`\n\n↳ {item['desc']}")
+        with c_audit:
+            st.markdown("#### 💯 今日紀律合規診斷")
+            for item in audit_results:
+                if item['level'] == 'success':
+                    st.success(f"**{item['title']}**\n\n{item['detail']}")
+                elif item['level'] == 'warning':
+                    st.warning(f"**{item['title']}**\n\n{item['detail']}")
+                else:
+                    st.error(f"**{item['title']}**\n\n{item['detail']}")
+
+        with c_watch:
+            st.markdown("#### 📌 短線重要防守與進攻價位")
+            for item in watchlist_results:
+                if "💀" in item['title']:
+                    st.error(f"**{item['title']}**: `{item['value']}`\n\n↳ {item['desc']}")
+                else:
+                    st.info(f"**{item['title']}**: `{item['value']}`\n\n↳ {item['desc']}")
+
+    except Exception as e:
+        st.error(f"即時數據讀取失敗: {e}")
 
     st.markdown("---")
     st.markdown("### 📜 歷史交易紀錄")
@@ -914,26 +912,31 @@ with tab1:
 # Tab 2: 指標詳情與溫度拆解
 with tab2:
     st.markdown("### 📐 當日技術指標與標的動態溫度")
-    
-    t_col1, t_col2 = st.columns([1, 2])
-    with t_col1:
-        st.metric("綜合溫度 (T)", f"{metrics['Temperature']:.1f} °C")
-        if metrics['Temperature'] > 95:
-            st.error("🔥 **沸點超買區 (T > 95)**\n隨時提防反轉跌破 MA5，請準備一鍵獲利了結。")
-        elif metrics['Temperature'] >= 35:
-            st.success("🟢 **黃金趨勢區 (35~95)**\n趨勢動能強勁，若突破 20 日高點可重倉買進。")
-        else:
-            st.warning("❄️ **冰點沉寂區 (T < 35)**\n走勢極弱，切勿追高，僅能觀察 RSI 抄底訊號。")
+    try:
+        df_kline, _ = cached_fetch_ohlc(stock_info['symbol'])
+        metrics, _ = TradingStrategyEngine.evaluate_pre_trade_advice(df_kline, stock_info, pos_summary, stock_target_capital)
+        
+        t_col1, t_col2 = st.columns([1, 2])
+        with t_col1:
+            st.metric("綜合溫度 (T)", f"{metrics['Temperature']:.1f} °C")
+            if metrics['Temperature'] > 95:
+                st.error("🔥 **沸點超買區 (T > 95)**\n隨時提防反轉跌破 MA5，請準備一鍵獲利了結。")
+            elif metrics['Temperature'] >= 35:
+                st.success("🟢 **黃金趨勢區 (35~95)**\n趨勢動能強勁，若突破 20 日高點可重倉買進。")
+            else:
+                st.warning("❄️ **冰點沉寂區 (T < 35)**\n走勢極弱，切勿追高，僅能觀察 RSI 抄底訊號。")
 
-    with t_col2:
-        ind_df = pd.DataFrame([
-            {"指標項目": "20日漲幅分位 (權重 24%)", "當前數值": f"{metrics['Temperature']:.1f}°C 綜合對映"},
-            {"指標項目": "20日區間相對位置 (權重 22%)", "當前數值": f"現價 {metrics['Close']:.2f} / 20日高點 {metrics['High_20']:.2f}"},
-            {"指標項目": "均線多頭結構 (權重 22%)", "當前數值": f"MA20: {metrics['MA20']:.2f} | MA60: {metrics['MA60']:.2f} ({metrics['MA60_Trend']})"},
-            {"指標項目": "RSI 14 擺盪指標 (權重 18%)", "當前數值": f"{metrics['RSI14']:.2f}"},
-            {"指標項目": "14日真實波幅 (ATR14)", "當前數值": f"{metrics['ATR14']:.4f}"},
-        ])
-        st.dataframe(ind_df, use_container_width=True, hide_index=True)
+        with t_col2:
+            ind_df = pd.DataFrame([
+                {"指標項目": "20日漲幅分位 (權重 24%)", "當前數值": f"{metrics['Temperature']:.1f}°C 綜合對映"},
+                {"指標項目": "20日區間相對位置 (權重 22%)", "當前數值": f"現價 {metrics['Close']:.2f} / 20日高點 {metrics['High_20']:.2f}"},
+                {"指標項目": "均線多頭結構 (權重 22%)", "當前數值": f"MA20: {metrics['MA20']:.2f} | MA60: {metrics['MA60']:.2f} ({metrics['MA60_Trend']})"},
+                {"指標項目": "RSI 14 擺盪指標 (權重 18%)", "當前數值": f"{metrics['RSI14']:.2f}"},
+                {"指標項目": "14日真實波幅 (ATR14)", "當前數值": f"{metrics['ATR14']:.4f}"},
+            ])
+            st.dataframe(ind_df, use_container_width=True, hide_index=True)
+    except Exception as e:
+        st.error(f"技術指標載入失敗: {e}")
 
 # Tab 3: 全自選掃描
 with tab3:
@@ -947,7 +950,7 @@ with tab3:
             s_data = db["stocks"][sym]
             try:
                 s_cap = float(s_data.get("target_capital", 200000.0))
-                df_s, src = data_engine.fetch_ohlc(sym)
+                df_s, src = cached_fetch_ohlc(sym)
                 p_sum = compute_position_summary(s_data.get('trades', []), df_s.iloc[-1]['Close'], s_cap)
                 m, sigs = TradingStrategyEngine.evaluate_pre_trade_advice(df_s, s_data, p_sum, s_cap)
                 sig_summary = " | ".join([s['title'] for s in sigs])
@@ -1009,7 +1012,7 @@ with tab4:
                 total_trades += len(trades)
 
                 try:
-                    df_s, _ = data_engine.fetch_ohlc(sym_k)
+                    df_s, _ = cached_fetch_ohlc(sym_k)
                     df_s_ind = TradingStrategyEngine.calculate_indicators(df_s)
                     curr_price = float(df_s_ind.iloc[-1]['Close'])
                     ma20 = float(df_s_ind.iloc[-1]['MA20']) if 'MA20' in df_s_ind else curr_price
@@ -1116,12 +1119,13 @@ with tab4:
         render_market_analysis(cn_stocks, "RMB ¥", "陸股/基金")
 
 # ==========================================
-# Tab 5: 歷史區間回測 (新增功能)
+# Tab 5: 歷史區間回測 (改為延遲加載)
 # ==========================================
 with tab5:
     st.markdown("### 📜 個股歷史策略模擬與回測系統")
-    st.caption("透過歷史數據，模擬【極寒抄底】、【黃金突破】、【沸點逃頂】與【絕對 8% 停損】策略的實際收益表現。")
+    st.caption("請先完成下方設定，完成後點擊【🚀 開始歷史回測模擬】才會向伺服器請求數據。")
 
+    # 1. 優先渲染設定區域，確保UI即刻出現不卡頓
     col_bt1, col_bt2, col_bt3 = st.columns([2, 2, 2])
     with col_bt1:
         bt_symbol = st.selectbox(
@@ -1140,13 +1144,15 @@ with tab5:
     with col_cap1:
         bt_capital = st.number_input("初始回測資金", min_value=10000.0, max_value=10000000.0, value=200000.0, step=50000.0)
 
+    # 2. 只有按按鈕後才去抓數據與計算
     if st.button("🚀 開始歷史回測模擬", type="primary"):
         start_str = bt_start.strftime("%Y-%m-%d")
         end_str = bt_end.strftime("%Y-%m-%d")
 
-        with st.spinner(f"正在拉取 {bt_symbol} 自 {start_str} 至 {end_str} 的歷史數據並執行模擬..."):
+        with st.spinner(f"正在擷取 {bt_symbol} 自 {start_str} 至 {end_str} 的歷史行情數據..."):
             try:
-                df_bt_raw, src_bt = data_engine.fetch_ohlc(bt_symbol, start_date=start_str, end_date=end_str)
+                # 呼叫帶有快取的數據獲取方法
+                df_bt_raw, src_bt = cached_fetch_ohlc(bt_symbol, start_date=start_str, end_date=end_str)
                 
                 if df_bt_raw.empty or len(df_bt_raw) < 60:
                     st.error("歷史數據不足 60 根 K 線，無法計算完整溫控指標與執行回測。請拉長日期區間。")
@@ -1161,14 +1167,14 @@ with tab5:
                     strat_return = ((final_strat_val - bt_capital) / bt_capital) * 100.0
                     bench_return = ((final_bench_val - bt_capital) / bt_capital) * 100.0
 
-                    # 最大回撤 (MDD) 計算
+                    # 最大回撤 (MDD)
                     equity_series = df_equity["策略資產淨值"]
                     cummax = equity_series.cummax()
                     drawdown = (equity_series - cummax) / cummax
                     max_drawdown = drawdown.min() * 100.0
 
                     # 勝率統計
-                    if not df_trades.empty and "全數賣出" in df_trades["動作"].values or "停損出場" in df_trades["動作"].values:
+                    if not df_trades.empty and ("全數賣出" in df_trades["動作"].values or "停損出場" in df_trades["動作"].values):
                         closed_trades = df_trades[df_trades["動作"].isin(["全數賣出", "停損出場"])]
                         win_count = len(closed_trades[closed_trades["損益"] > 0])
                         total_closed = len(closed_trades)
