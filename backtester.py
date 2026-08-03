@@ -211,12 +211,6 @@ class TradingStrategyEngine:
         df['MA10'] = df['Close'].rolling(10).mean()
         df['MA20'] = df['Close'].rolling(20).mean()
         df['MA60'] = df['Close'].rolling(60).mean()
-        df['MA10_Vol'] = df['Volume'].rolling(10).mean()
-
-        candle_range = df['High'] - df['Low']
-        df['Candle_Body_Ratio'] = np.where(candle_range > 0, (df['Close'] - df['Open']) / candle_range, 0.0)
-        df['Bias_MA20'] = (df['Close'] - df['MA20']) / df['MA20'] * 100.0
-        df['MA60_Slope'] = df['MA60'] - df['MA60'].shift(3)
 
         df['TR0'] = df['High'] - df['Low']
         df['TR1'] = (df['High'] - df['Close'].shift(1)).abs()
@@ -271,7 +265,7 @@ class TradingStrategyEngine:
         return df
 
 # ==========================================
-# 3. 歷史回測引擎 (升級高勝率建倉模組)
+# 3. 歷史回測引擎 (新策略 logic)
 # ==========================================
 class StrategyBacktester:
     def __init__(self, df: pd.DataFrame, initial_capital: float = 200000.0, start_date: str = None, end_date: str = None):
@@ -288,8 +282,12 @@ class StrategyBacktester:
         cash = self.initial_capital
         shares = 0
         avg_cost = 0.0
-        took_profit = False
-        has_stopped_out = False
+        
+        # 策略狀態標記
+        took_profit_15 = False
+        took_atr_profit = False
+        highest_price_since_entry = 0.0
+        last_add_price = 0.0
         
         trades = []
         equity_curve = []
@@ -305,124 +303,98 @@ class StrategyBacktester:
             prev_10 = df.iloc[i-10:i]
             
             price = float(today['Close'])
-            open_price = float(today['Open'])
             low = float(today['Low'])
-            volume = float(today['Volume'])
             
             ma5 = float(today['MA5']) if not np.isnan(today['MA5']) else price
             ma10 = float(today['MA10']) if not np.isnan(today['MA10']) else price
             ma20 = float(today['MA20']) if not np.isnan(today['MA20']) else price
-            y_ma5 = float(yesterday['MA5']) if not np.isnan(yesterday['MA5']) else ma5
-            y_ma20 = float(yesterday['MA20']) if not np.isnan(yesterday['MA20']) else ma20
-            
             rsi14 = float(today['RSI14']) if not np.isnan(today['RSI14']) else 50.0
             temp = float(today['Temperature']) if not np.isnan(today['Temperature']) else 50.0
-            high_20 = float(today['High_20']) if not np.isnan(today['High_20']) else price
-            ma10_vol_prev = float(yesterday['MA10_Vol']) if not np.isnan(yesterday['MA10_Vol']) else volume
+            atr14 = float(today['ATR14']) if not np.isnan(today['ATR14']) else 0.0
             yesterday_low = float(yesterday['Low'])
-            
-            vol_ratio = volume / ma10_vol_prev if ma10_vol_prev > 0 else 0.0
-            bullish_trend = price > ma20 and ma5 > ma20
+            yesterday_close = float(yesterday['Close'])
+            yesterday_ma10 = float(yesterday['MA10']) if not np.isnan(yesterday['MA10']) else yesterday_close
 
-            # --- K 線實體與 ATR 過濾 ---
-            candle_body = price - open_price
-            atr14_val = float(today['ATR14']) if not np.isnan(today['ATR14']) else 0.0
-            is_strong_red_candle = (candle_body > 0) and (candle_body >= atr14_val * 0.7)
-
-            # --- RSI 背離計算 ---
+            # RSI 背離計算
             price_low_10 = low < prev_10['Low'].min()
             min_rsi_10 = prev_10['RSI14'].min()
-            rsi_diff = rsi14 - min_rsi_10
-            rsi_bullish_div = price_low_10 and (rsi14 > min_rsi_10) and (rsi14 < 45)
+            rsi_bullish_div = price_low_10 and (rsi14 > min_rsi_10)
 
-            # --- 新版高勝率建倉條件 ---
-            # A. 左側帶量止跌建倉 (40%): 背離 + 站穩 MA5/MA10 + 實體強勢紅棒
-            first_bottom_signal = (
-                rsi_bullish_div and 
-                (temp < 35.0) and 
-                (price > ma5 and price > ma10) and 
-                is_strong_red_candle
-            )
-            
-            # B. 右側均線扭轉建倉 (60%): 突破 MA20 或 MA5金叉MA20 + 帶量 + 避開過熱區
-            ma20_breakout = (price > ma20) and (yesterday['Close'] <= y_ma20)
-            ma5_cross_ma20 = (ma5 > ma20) and (y_ma5 <= y_ma20)
-            right_side_signal = (
-                (ma20_breakout or ma5_cross_ma20) and 
-                (vol_ratio >= 1.25) and 
-                (35.0 <= temp <= 75.0)
-            )
+            # 更新最高價
+            if shares > 0:
+                if price > highest_price_since_entry:
+                    highest_price_since_entry = price
 
-            # C. 停損後的二次探底條件：RSI背離 > 20點 + 最低價 > MA5
-            second_bottom_signal = price_low_10 and (rsi_diff > 20.0) and (low > ma5)
-
-            # 1. 出場與減倉機制
+            # ==========================================
+            # 1. 離場與減倉機制
+            # ==========================================
             sold_today = False
             if shares > 0:
-                hard_stop_price = avg_cost * 0.92
                 unrealized_pct = ((price - avg_cost) / avg_cost) * 100.0
 
-                # A. 獲利 15% 減倉 50%
-                if unrealized_pct >= 15.0 and not took_profit:
+                # A. 盈利超過 15% 減倉 50%
+                if unrealized_pct >= 15.0 and not took_profit_15:
                     sell_shares = int(shares * 0.5)
                     if sell_shares > 0:
                         sell_amount = sell_shares * price
                         pnl = sell_amount - (sell_shares * avg_cost)
                         cash += sell_amount
                         shares -= sell_shares
-                        took_profit = True
+                        took_profit_15 = True
                         trades.append({
-                            "日期": date_str, "動作": "減倉50%", "原因": "💰 獲利達15%鎖利", 
+                            "日期": date_str, "動作": "減碼50%", "原因": "💰 盈利超15%鎖利", 
                             "成交價": price, "股數": sell_shares, "損益": pnl, "報酬率": f"{unrealized_pct:+.2f}%", "剩餘現金": cash
                         })
 
-                # B. 沸點逃頂
+                # B. 沸點反轉全清倉 (T > 95°C 且 跌破前日低點 或 跌破 MA5)
                 if temp > 95.0 and (price < yesterday_low or price < ma5):
                     sell_amount = shares * price
                     pnl = sell_amount - (shares * avg_cost)
                     pnl_pct = (pnl / (shares * avg_cost)) * 100
                     cash += sell_amount
                     trades.append({
-                        "日期": date_str, "動作": "全數賣出", "原因": "🔥 沸點反轉逃頂", 
+                        "日期": date_str, "動作": "全數賣出", "原因": "🔥 沸點反轉全清倉 (T>95°C)", 
                         "成交價": price, "股數": shares, "損益": pnl, "報酬率": f"{pnl_pct:+.2f}%", "剩餘現金": cash
                     })
                     shares = 0
                     avg_cost = 0.0
-                    took_profit = False
+                    highest_price_since_entry = 0.0
+                    last_add_price = 0.0
+                    took_profit_15 = False
+                    took_atr_profit = False
                     sold_today = True
-                    has_stopped_out = False
-                    
-                # C. 8% 絕對停損
-                elif price <= hard_stop_price:
+
+                # C. 無條件生命線止損 (跌破 MA20)
+                elif price < ma20:
                     sell_amount = shares * price
                     pnl = sell_amount - (shares * avg_cost)
                     pnl_pct = (pnl / (shares * avg_cost)) * 100
                     cash += sell_amount
                     trades.append({
-                        "日期": date_str, "動作": "停損出場", "原因": "🚨 跌破成本 8%", 
+                        "日期": date_str, "動作": "清倉離場", "原因": "🚨 跌破 MA20 生命線", 
                         "成交價": price, "股數": shares, "損益": pnl, "報酬率": f"{pnl_pct:+.2f}%", "剩餘現金": cash
                     })
                     shares = 0
                     avg_cost = 0.0
-                    took_profit = False
+                    highest_price_since_entry = 0.0
+                    last_add_price = 0.0
+                    took_profit_15 = False
+                    took_atr_profit = False
                     sold_today = True
-                    has_stopped_out = True
-                    
-                # D. 建倉失敗停損 (跌破 MA20 * 0.97)
-                elif price < ma20 * 0.97:
-                    sell_amount = shares * price
-                    pnl = sell_amount - (shares * avg_cost)
-                    pnl_pct = (pnl / (shares * avg_cost)) * 100
-                    cash += sell_amount
-                    trades.append({
-                        "日期": date_str, "動作": "停損出場", "原因": "⚠️ 跌破 MA20 3%", 
-                        "成交價": price, "股數": shares, "損益": pnl, "報酬率": f"{pnl_pct:+.2f}%", "剩餘現金": cash
-                    })
-                    shares = 0
-                    avg_cost = 0.0
-                    took_profit = False
-                    sold_today = True
-                    has_stopped_out = True
+
+                # D. 極端高溫動態保險絲 (自最高點回撤達 2.5 倍 ATR)
+                elif not took_atr_profit and highest_price_since_entry > 0 and (highest_price_since_entry - price) >= (2.5 * atr14):
+                    sell_shares = int(shares * 0.5)
+                    if sell_shares > 0:
+                        sell_amount = sell_shares * price
+                        pnl = sell_amount - (sell_shares * avg_cost)
+                        cash += sell_amount
+                        shares -= sell_shares
+                        took_atr_profit = True
+                        trades.append({
+                            "日期": date_str, "動作": "減碼50%", "原因": "🛡️ 自高點回撤 2.5x ATR 保險絲觸發", 
+                            "成交價": price, "股數": sell_shares, "損益": pnl, "報酬率": f"{unrealized_pct:+.2f}%", "剩餘現金": cash
+                        })
 
             if sold_today:
                 current_portfolio_value = cash
@@ -434,67 +406,63 @@ class StrategyBacktester:
                 })
                 continue
 
-            # 2. 建倉與加倉機制
-            if shares == 0:
-                # 情境 A：曾停損離場，需滿足「二次探底：RSI背離>20且低點>MA5」
-                if has_stopped_out:
-                    if second_bottom_signal:
-                        buy_budget = self.initial_capital * 0.4
+            # ==========================================
+            # 2. 進場與加倉機制 (高溫 T > 80°C 嚴禁買進)
+            # ==========================================
+            if temp <= 80.0:
+                # --- 第一步：極寒抄底 (試錯底倉 15%) ---
+                if shares == 0:
+                    if rsi_bullish_div and temp < 35.0:
+                        buy_budget = self.initial_capital * 0.15
                         buy_shares = int(buy_budget / price)
                         if buy_shares > 0 and cash >= buy_shares * price:
                             cost = buy_shares * price
                             cash -= cost
                             shares = buy_shares
                             avg_cost = price
-                            took_profit = False
-                            has_stopped_out = False
+                            last_add_price = price
+                            highest_price_since_entry = price
+                            took_profit_15 = False
+                            took_atr_profit = False
                             trades.append({
-                                "日期": date_str, "動作": "建倉(40%)", "原因": f"🎯 二次探底建倉 (RSI背離達+{rsi_diff:.1f}點且低點>MA5)", 
+                                "日期": date_str, "動作": "建倉(15%)", "原因": "🥶 極寒抄底 (RSI背離 + T<35°C)", 
                                 "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%", "剩餘現金": cash
                             })
 
-                # 情境 B：初始或正常建倉
-                else:
-                    if first_bottom_signal:
-                        buy_budget = self.initial_capital * 0.4
-                        buy_shares = int(buy_budget / price)
-                        if buy_shares > 0 and cash >= buy_shares * price:
-                            cost = buy_shares * price
-                            cash -= cost
-                            shares = buy_shares
-                            avg_cost = price
-                            took_profit = False
+                # --- 既有部位之加碼機制 ---
+                elif shares > 0 and cash >= (price * 100):
+                    # 15% 底倉建立後的動態加碼：每跌 10% 或每漲 5% 加倉 1 層 (約 10% 資金)
+                    price_change_from_last = (price - last_add_price) / last_add_price
+                    if price_change_from_last <= -0.10 or price_change_from_last >= 0.05:
+                        add_budget = self.initial_capital * 0.10
+                        add_shares = int(min(add_budget, cash) / price)
+                        if add_shares > 0:
+                            total_cost = (shares * avg_cost) + (add_shares * price)
+                            shares += add_shares
+                            avg_cost = total_cost / shares
+                            cash -= (add_shares * price)
+                            last_add_price = price
                             trades.append({
-                                "日期": date_str, "動作": "建倉(40%)", "原因": "🛡️ 帶量止跌建倉 (站穩MA5/10+實體紅棒)", 
-                                "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%", "剩餘現金": cash
-                            })
-                    elif right_side_signal:
-                        buy_budget = self.initial_capital * 0.6
-                        buy_shares = int(buy_budget / price)
-                        if buy_shares > 0 and cash >= buy_shares * price:
-                            cost = buy_shares * price
-                            cash -= cost
-                            shares = buy_shares
-                            avg_cost = price
-                            took_profit = False
-                            trades.append({
-                                "日期": date_str, "動作": "建倉(60%)", "原因": "🚀 均線結構扭轉 (突破MA20/金叉+帶量)", 
-                                "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%", "剩餘現金": cash
+                                "日期": date_str, "動作": "加碼1層", "原因": f"📈 動態加碼 (價格變動 {price_change_from_last:+.1f}%)", 
+                                "成交價": price, "股數": add_shares, "損益": 0.0, "報酬率": "0.00%", "剩餘現金": cash
                             })
 
-            # 已有部位且尚有現金，觸發二次加碼打滿
-            elif shares > 0 and cash >= (self.initial_capital * 0.1):
-                if (right_side_signal or bullish_trend) and 35.0 <= temp <= 85.0:
-                    add_shares = int(cash / price)
-                    if add_shares > 0:
-                        total_cost = (shares * avg_cost) + (add_shares * price)
-                        shares += add_shares
-                        avg_cost = total_cost / shares
-                        cash -= (add_shares * price)
-                        trades.append({
-                            "日期": date_str, "動作": "加碼打滿", "原因": "🚀 主升段加碼", 
-                            "成交價": price, "股數": add_shares, "損益": 0.0, "報酬率": "0.00%", "剩餘現金": cash
-                        })
+                    # --- 第二步：黃金突破 (第一次破 MA10 且未破新低，剩餘資金單次打滿) ---
+                    breakout_ma10 = (price > ma10) and (yesterday_close <= yesterday_ma10)
+                    not_new_low = low >= prev_10['Low'].min()
+                    
+                    if breakout_ma10 and not_new_low and (35.0 <= temp <= 80.0):
+                        add_shares = int(cash / price)
+                        if add_shares > 0:
+                            total_cost = (shares * avg_cost) + (add_shares * price)
+                            shares += add_shares
+                            avg_cost = total_cost / shares
+                            cash -= (add_shares * price)
+                            last_add_price = price
+                            trades.append({
+                                "日期": date_str, "動作": "黃金突破打滿", "原因": "🚀 突破 MA10 且未破新低 (35°C≤T≤80°C)", 
+                                "成交價": price, "股數": add_shares, "損益": 0.0, "報酬率": "0.00%", "剩餘現金": cash
+                            })
 
             current_portfolio_value = cash + (shares * price)
             benchmark_value = (self.initial_capital / df.iloc[0]['Close']) * price
@@ -656,7 +624,7 @@ if db.get("stocks"):
 
 # ----------------- 主介面：歷史區間回測 -----------------
 st.title("📜 個股歷史策略模擬與回測系統")
-st.caption("建倉邏輯已優化：導入左側帶量止跌（站穩MA5/10）與右側均線扭轉（突破MA20/金叉）雙重精準觸發。")
+st.caption("目前採用【低頻精準打擊 + MA20生命線止損 + 2.5x ATR動態保險絲 + 95°C沸點全清倉】策略機制。")
 
 col_bt1, col_bt2, col_bt3 = st.columns([2, 2, 2])
 with col_bt1:
@@ -706,8 +674,8 @@ if st.button("🚀 開始歷史回測模擬", type="primary"):
                     drawdown = (equity_series - cummax) / cummax
                     max_drawdown = drawdown.min() * 100.0 if not drawdown.empty else 0.0
 
-                    if not df_trades.empty and any(act in df_trades["動作"].values for act in ["全數賣出", "停損出場", "減倉50%"]):
-                        closed_trades = df_trades[df_trades["動作"].isin(["全數賣出", "停損出場", "減倉50%"])]
+                    if not df_trades.empty and any(act in df_trades["動作"].values for act in ["全數賣出", "清倉離場", "減碼50%"]):
+                        closed_trades = df_trades[df_trades["動作"].isin(["全數賣出", "清倉離場", "減碼50%"])]
                         win_count = len(closed_trades[closed_trades["損益"] > 0])
                         total_closed = len(closed_trades)
                         win_rate = (win_count / total_closed * 100.0) if total_closed > 0 else 0.0
@@ -723,7 +691,7 @@ if st.button("🚀 開始歷史回測模擬", type="primary"):
                     b2.metric("策略總累積報酬率", f"{strat_return:+.2f}%", delta=f"{strat_return - bench_return:+.2f}% vs 基準")
                     b3.metric("買入持有 (Benchmark)", f"{bench_return:+.2f}%")
                     b4.metric("最大資產回撤 (MDD)", f"{max_drawdown:.2f}%")
-                    b5.metric("出場/減倉勝率", f"{win_rate:.1f}%", f"共 {total_closed} 次操作")
+                    b5.metric("出場/減碼勝率", f"{win_rate:.1f}%", f"共 {total_closed} 次操作")
 
                     st.markdown("---")
                     st.markdown("#### 📈 資產淨值成長曲線 vs 買入持有對照")
