@@ -266,7 +266,7 @@ class TradingStrategyEngine:
         return df
 
 # ==========================================
-# 3. 歷史回測引擎 (清倉：破MA20 + 創10日新低)
+# 3. 歷史回測引擎 (精準右側進場與嚴格左側防護版)
 # ==========================================
 class StrategyBacktester:
     def __init__(self, df: pd.DataFrame, initial_capital: float = 200000.0, start_date: str = None, end_date: str = None):
@@ -333,6 +333,7 @@ class StrategyBacktester:
             else:
                 ma20_slope_5d = 0.0
 
+            # 🛑 雙重空頭防守條件：1. 斜率陡峭下滑  2. 價格低於 MA20 且 MA20 低於 MA60
             is_downtrend_structure = (price < ma20 and ma20 < ma60)
             is_steep_downtrend = (ma20_slope_5d <= -1.0) or is_downtrend_structure
 
@@ -342,10 +343,6 @@ class StrategyBacktester:
             rsi_diff = rsi14 - min_rsi_20
             rsi_bullish_div = price_low_20 and (rsi_diff > 0)
             is_bullish_candle = price > open_p
-
-            # 10 日新低判定 (不含今日)
-            min_close_10 = prev_10['Close'].min()
-            is_10d_low = price < min_close_10
 
             if shares > 0:
                 if price > highest_price_since_entry:
@@ -384,8 +381,8 @@ class StrategyBacktester:
                         "當下倉位": "0 股 (0.0%)", "剩餘現金": round(cash, 2)
                     })
 
-                # 🚨 2. MA20 生命線清倉 (需同時跌破 MA20 且創 10 日新低)
-                elif (has_crossed_ma20 or took_profit_15 or took_atr_profit) and (price < ma20) and is_10d_low:
+                # 🚨 2. MA20 生命線清倉
+                elif (has_crossed_ma20 or took_profit_15 or took_atr_profit) and price < ma20:
                     sell_amount = shares * price
                     pnl = sell_amount - (shares * avg_cost)
                     cash += sell_amount
@@ -403,7 +400,7 @@ class StrategyBacktester:
                     sold_today = True
 
                     trades.append({
-                        "Date": date, "日期": date_str, "動作": "清倉離場", "類別": "Sell", "原因": "🚨 跌破 MA20 且創10日新低清倉", 
+                        "Date": date, "日期": date_str, "動作": "清倉離場", "類別": "Sell", "原因": "🚨 跌破 MA20 生命線清倉", 
                         "成交價": price, "股數": sell_shares, "損益": round(pnl, 2), "報酬率": f"{unrealized_pct:+.2f}%", 
                         "當下倉位": "0 股 (0.0%)", "剩餘現金": round(cash, 2)
                     })
@@ -479,7 +476,7 @@ class StrategyBacktester:
                 continue
 
             # ==========================================
-            # 2. 進場與加碼機制
+            # 2. 進場與加倉機制
             # ==========================================
             if cooldown_counter == 0 and temp <= 85.0:
                 
@@ -573,7 +570,7 @@ class StrategyBacktester:
         return df_equity, df_trades, df
 
 # ==========================================
-# 4. 本地 JSON 數據庫管理者 (新增日期記憶)
+# 4. 本地 JSON 數據庫管理者
 # ==========================================
 DB_FILE = "portfolio_data.json"
 
@@ -582,13 +579,8 @@ def save_db(db):
         json.dump(db, f, ensure_ascii=False, indent=4)
 
 def load_db():
-    default_start = (datetime.now() - timedelta(days=365 * 2)).strftime("%Y-%m-%d")
-    default_end = datetime.now().strftime("%Y-%m-%d")
-    
     default_db = {
         "stock_order": ["2330.TW", "513380"],
-        "bt_start_date": default_start,
-        "bt_end_date": default_end,
         "stocks": {
             "2330.TW": {
                 "symbol": "2330.TW", "name": "台積電",
@@ -607,8 +599,6 @@ def load_db():
                 data = json.load(f)
 
             if "stocks" in data:
-                data.setdefault("bt_start_date", default_start)
-                data.setdefault("bt_end_date", default_end)
                 saved_order = data.get("stock_order", [])
                 existing_keys = list(data["stocks"].keys())
                 final_order = [k for k in saved_order if k in existing_keys]
@@ -618,12 +608,7 @@ def load_db():
                 data["stock_order"] = final_order
                 return data
             else:
-                new_data = {
-                    "stock_order": [],
-                    "bt_start_date": default_start,
-                    "bt_end_date": default_end,
-                    "stocks": {}
-                }
+                new_data = {"stock_order": [], "stocks": {}}
                 for key, val in data.items():
                     if isinstance(val, dict):
                         new_data["stocks"][key] = {
@@ -717,17 +702,6 @@ if db.get("stocks"):
 
 st.title("📜 個股歷史策略模擬與回測系統")
 
-# 自動載入與寫入記憶日期
-saved_start_str = db.get("bt_start_date", (datetime.now() - timedelta(days=365 * 2)).strftime("%Y-%m-%d"))
-saved_end_str = db.get("bt_end_date", datetime.now().strftime("%Y-%m-%d"))
-
-try:
-    init_start_date = datetime.strptime(saved_start_str, "%Y-%m-%d").date()
-    init_end_date = datetime.strptime(saved_end_str, "%Y-%m-%d").date()
-except Exception:
-    init_start_date = datetime.now().date() - timedelta(days=365 * 2)
-    init_end_date = datetime.now().date()
-
 col_bt1, col_bt2, col_bt3 = st.columns([2, 2, 2])
 with col_bt1:
     bt_symbol = st.selectbox(
@@ -737,17 +711,10 @@ with col_bt1:
         key="bt_symbol"
     )
 with col_bt2:
-    bt_start = st.date_input("回測開始日期", value=init_start_date)
+    default_start = datetime.now() - timedelta(days=365 * 2)
+    bt_start = st.date_input("回測開始日期", value=default_start)
 with col_bt3:
-    bt_end = st.date_input("回測結束日期", value=init_end_date)
-
-# 當日期改變時，自動寫入數據庫儲存
-new_start_str = bt_start.strftime("%Y-%m-%d")
-new_end_str = bt_end.strftime("%Y-%m-%d")
-if new_start_str != db.get("bt_start_date") or new_end_str != db.get("bt_end_date"):
-    db["bt_start_date"] = new_start_str
-    db["bt_end_date"] = new_end_str
-    save_db(db)
+    bt_end = st.date_input("回測結束日期", value=datetime.now())
 
 col_cap1, col_cap2 = st.columns([2, 4])
 with col_cap1:
