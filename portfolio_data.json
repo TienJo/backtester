@@ -1,0 +1,191 @@
+{
+    "total_capital": 160000.0,
+    "stocks": {
+        "2330.TW": {
+            "symbol": "2330.TW",
+            "name": "台積電",
+            "trades": [
+                {
+                    "date": "2026-07-31",
+                    "type": "BUY",
+                    "price": 2425.0,
+                    "shares": 4,
+                    "note": "建倉"
+                }
+            ],
+            "peak_price_since_entry": 2425.0,
+            "peak_unrealized_pnl": 0.0,
+            "target_capital": 100000.0
+        },
+        "2317.TW": {
+            "symbol": "2317.TW",
+            "name": "鴻海",
+            "trades": [],
+            "peak_price_since_entry": 0.0,
+            "peak_unrealized_pnl": 0.0,
+            "target_capital": 160000.0
+        },
+        "3711.TW": {
+            "symbol": "3711.TW",
+            "name": "日月光",
+            "trades": [
+                {
+                    "date": "2026-07-31",
+                    "type": "BUY",
+                    "price": 555.0,
+                    "shares": 1,
+                    "note": "我看縮量下跌，建測試倉"
+                }
+            ],
+            "peak_price_since_entry": 0.0,
+            "peak_unrealized_pnl": 0.0,
+            "target_capital": 160000.0
+        },
+        "3037.TW": {
+            "symbol": "3037.TW",
+            "name": "欣興電子",
+            "trades": [],
+            "peak_price_since_entry": 0.0,
+            "peak_unrealized_pnl": 0.0,
+            "target_capital": 160000.0
+        },
+        "3017.TW": {
+            "symbol": "3017.TW",
+            "name": "奇鋐科技",
+            "trades": [],
+            "peak_price_since_entry": 0.0,
+            "peak_unrealized_pnl": 0.0,
+            "target_capital": 160000.0
+        },
+        "561160": {
+            "symbol": "561160",
+            "name": "富國電池ETF",
+            "trades": [],
+            "peak_price_since_entry": 0.0,
+            "peak_unrealized_pnl": 0.0,
+            "target_capital": 160000.0
+        },
+        "513380": {
+            "symbol": "513380",
+            "name": "恆生科技廣發ETF",
+            "trades": [],
+            "peak_price_since_entry": 0.0,
+            "peak_unrealized_pnl": 0.0,
+            "target_capital": 160000.0
+        },
+        "588000": {
+            "symbol": "588000",
+            "name": "科創50ETF華夏",
+            "trades": [],
+            "peak_price_since_entry": 0.0,
+            "peak_unrealized_pnl": 0.0,
+            "target_capital": 160000.0
+        },
+        "515880": {
+            "symbol": "515880",
+            "name": "通信ETF國泰",
+            "trades": [],
+            "peak_price_since_entry": 0.0,
+            "peak_unrealized_pnl": 0.0,
+            "target_capital": 160000.0
+        },
+        "0050.TW": {
+            "symbol": "0050.TW",
+            "name": "元大台灣50",
+            "trades": [],
+            "peak_price_since_entry": 0.0,
+            "peak_unrealized_pnl": 0.0,
+            "target_capital": 160000.0
+        },
+        "515030": {
+            "symbol": "515030",
+            "name": "新能源车ETF华夏",
+            "trades": [
+                {
+                    "date": "2026-08-01",
+                    "type": "BUY",
+                    "price": 1.619,
+                    "shares": 2470,
+                    "note": "模擬建倉"
+                }
+            ],
+            "peak_price_since_entry": 1.642,
+            "peak_unrealized_pnl": 0.0,
+            "target_capital": 40000.0
+        },
+        "00981A.TW": {
+            "symbol": "00981A.TW",
+            "name": "00981A.TW",
+            "target_capital": 100000.0,
+            "trades": [],
+            "peak_price_since_entry": 0.0,
+            "peak_unrealized_pnl": 0.0
+        },
+        "2308.TW": {
+            "symbol": "2308.TW",
+            "name": "台達電",
+            "target_capital": 100000.0,
+            "trades": [],
+            "peak_price_since_entry": 0.0,
+            "peak_unrealized_pnl": 0.0
+        },
+        "3231.TW": {
+            "symbol": "3231.TW",
+            "name": "緯創",
+            "target_capital": 100000.0,
+            "trades": [],
+            "peak_price_since_entry": 0.0,
+            "peak_unrealized_pnl": 0.0
+        },
+        "515150": {
+            "symbol": "515150",
+            "name": "房地產ETF",
+            "target_capital": 30000.0,
+            "trades": [
+                {
+                    "date": "2026-08-02",
+                    "type": "BUY",
+                    "price": 1.533,
+                    "shares": 1956,
+                    "note": "測試建倉，說是主升初期"
+                }
+            ],
+            "peak_price_since_entry": 0.0,
+            "peak_unrealized_pnl": 0.0
+        },
+        "512010": {
+            "symbol": "512010",
+            "name": "醫藥生物ETF",
+            "target_capital": 30000.0,
+            "trades": [
+                {
+                    "date": "2026-08-02",
+                    "type": "BUY",
+                    "price": 0.377,
+                    "shares": 7957,
+                    "note": "已經漲了19.7%但是按策略來說還能順勢"
+                }
+            ],
+            "peak_price_since_entry": 0.0,
+            "peak_unrealized_pnl": 0.0
+        }
+    },
+    "stock_order": [
+        "561160",
+        "513380",
+        "588000",
+        "515880",
+        "515030",
+        "512010",
+        "515150",
+        "2330.TW",
+        "2317.TW",
+        "3711.TW",
+        "3037.TW",
+        "3017.TW",
+        "2308.TW",
+        "0050.TW",
+        "3231.TW",
+        "00981A.TW"
+    ]
+}
