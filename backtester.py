@@ -271,7 +271,7 @@ class TradingStrategyEngine:
         return df
 
 # ==========================================
-# 3. 歷史回測引擎
+# 3. 歷史回測引擎 (升級高勝率建倉模組)
 # ==========================================
 class StrategyBacktester:
     def __init__(self, df: pd.DataFrame, initial_capital: float = 200000.0, start_date: str = None, end_date: str = None):
@@ -305,11 +305,16 @@ class StrategyBacktester:
             prev_10 = df.iloc[i-10:i]
             
             price = float(today['Close'])
+            open_price = float(today['Open'])
             low = float(today['Low'])
             volume = float(today['Volume'])
             
             ma5 = float(today['MA5']) if not np.isnan(today['MA5']) else price
+            ma10 = float(today['MA10']) if not np.isnan(today['MA10']) else price
             ma20 = float(today['MA20']) if not np.isnan(today['MA20']) else price
+            y_ma5 = float(yesterday['MA5']) if not np.isnan(yesterday['MA5']) else ma5
+            y_ma20 = float(yesterday['MA20']) if not np.isnan(yesterday['MA20']) else ma20
+            
             rsi14 = float(today['RSI14']) if not np.isnan(today['RSI14']) else 50.0
             temp = float(today['Temperature']) if not np.isnan(today['Temperature']) else 50.0
             high_20 = float(today['High_20']) if not np.isnan(today['High_20']) else price
@@ -317,19 +322,38 @@ class StrategyBacktester:
             yesterday_low = float(yesterday['Low'])
             
             vol_ratio = volume / ma10_vol_prev if ma10_vol_prev > 0 else 0.0
-            breakout_20_high = (price > high_20) and (vol_ratio >= 1.2)
             bullish_trend = price > ma20 and ma5 > ma20
 
-            # RSI 背離計算
+            # --- K 線實體與 ATR 過濾 ---
+            candle_body = price - open_price
+            atr14_val = float(today['ATR14']) if not np.isnan(today['ATR14']) else 0.0
+            is_strong_red_candle = (candle_body > 0) and (candle_body >= atr14_val * 0.7)
+
+            # --- RSI 背離計算 ---
             price_low_10 = low < prev_10['Low'].min()
             min_rsi_10 = prev_10['RSI14'].min()
             rsi_diff = rsi14 - min_rsi_10
-            
-            # 1. 嚴格按您的規定：極寒抄底 = RSI底背離 + 溫度 < 35度
             rsi_bullish_div = price_low_10 and (rsi14 > min_rsi_10) and (rsi14 < 45)
-            first_bottom_signal = rsi_bullish_div and (temp < 35.0)
+
+            # --- 新版高勝率建倉條件 ---
+            # A. 左側帶量止跌建倉 (40%): 背離 + 站穩 MA5/MA10 + 實體強勢紅棒
+            first_bottom_signal = (
+                rsi_bullish_div and 
+                (temp < 35.0) and 
+                (price > ma5 and price > ma10) and 
+                is_strong_red_candle
+            )
             
-            # 2. 停損後的二次探底條件：RSI背離 > 20點 + 最低價 > MA5
+            # B. 右側均線扭轉建倉 (60%): 突破 MA20 或 MA5金叉MA20 + 帶量 + 避開過熱區
+            ma20_breakout = (price > ma20) and (yesterday['Close'] <= y_ma20)
+            ma5_cross_ma20 = (ma5 > ma20) and (y_ma5 <= y_ma20)
+            right_side_signal = (
+                (ma20_breakout or ma5_cross_ma20) and 
+                (vol_ratio >= 1.25) and 
+                (35.0 <= temp <= 75.0)
+            )
+
+            # C. 停損後的二次探底條件：RSI背離 > 20點 + 最低價 > MA5
             second_bottom_signal = price_low_10 and (rsi_diff > 20.0) and (low > ma5)
 
             # 1. 出場與減倉機制
@@ -441,10 +465,10 @@ class StrategyBacktester:
                             avg_cost = price
                             took_profit = False
                             trades.append({
-                                "日期": date_str, "動作": "建倉(40%)", "原因": "🎯 極寒抄底 (T < 35度 + RSI底背離)", 
+                                "日期": date_str, "動作": "建倉(40%)", "原因": "🛡️ 帶量止跌建倉 (站穩MA5/10+實體紅棒)", 
                                 "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%", "剩餘現金": cash
                             })
-                    elif breakout_20_high and 35.0 <= temp <= 80.0:
+                    elif right_side_signal:
                         buy_budget = self.initial_capital * 0.6
                         buy_shares = int(buy_budget / price)
                         if buy_shares > 0 and cash >= buy_shares * price:
@@ -454,13 +478,13 @@ class StrategyBacktester:
                             avg_cost = price
                             took_profit = False
                             trades.append({
-                                "日期": date_str, "動作": "建倉(60%)", "原因": "🚀 黃金突破", 
+                                "日期": date_str, "動作": "建倉(60%)", "原因": "🚀 均線結構扭轉 (突破MA20/金叉+帶量)", 
                                 "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%", "剩餘現金": cash
                             })
 
             # 已有部位且尚有現金，觸發二次加碼打滿
             elif shares > 0 and cash >= (self.initial_capital * 0.1):
-                if (breakout_20_high or bullish_trend) and 35.0 <= temp <= 85.0:
+                if (right_side_signal or bullish_trend) and 35.0 <= temp <= 85.0:
                     add_shares = int(cash / price)
                     if add_shares > 0:
                         total_cost = (shares * avg_cost) + (add_shares * price)
@@ -632,6 +656,7 @@ if db.get("stocks"):
 
 # ----------------- 主介面：歷史區間回測 -----------------
 st.title("📜 個股歷史策略模擬與回測系統")
+st.caption("建倉邏輯已優化：導入左側帶量止跌（站穩MA5/10）與右側均線扭轉（突破MA20/金叉）雙重精準觸發。")
 
 col_bt1, col_bt2, col_bt3 = st.columns([2, 2, 2])
 with col_bt1:
