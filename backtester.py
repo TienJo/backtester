@@ -1,113 +1,3 @@
-
-Gemini
-
-即時通訊
-
-Spark
-Beta 版
-新對話
-搜尋對話
-影片
-媒體庫
-Gem
-新增筆記本
-appEXtemper
-appEX回血版
-appEX
-block catcher
-遠方設計夢的階級幻覺
-九型人格測試結果解析
-英文課
-策略更新與程式碼提供
-中長線投資策略（6-12個月）
-RSI 底背離觸發原因解析
-分支 • 分支 • 分支 • 分支 • 分支 • 分支 • 策略回測系統開發建議
-分支 • 分支 • 分支 • 分支 • 策略回測系統開發建議
-股價走勢線角度分析
-策略回測系統開發建議
-彼得前書 1:13-16 聖潔生活呼召
-分支 • appEX
-appEX雲端部屬
-程式碼支援陸股新增教學
-順勢交易策略與APP構想
-離均差（乖離率）是什麼
-台股零股交易規則說明
-Streamlit 命令執行錯誤排除
-PowerShell 執行 Python 檔案教學
-半導體反彈倉位策略分析
-鞋子TPU射出飾片英文翻譯
-ComfyUI RMBG 批量去背教學
-以色列人信心跨越曠野之旅
-順豐運送電腦螢幕至台灣費用
-離職出差兩難抉擇
-鞋類設計結合角色世界觀建議
-日文「要不然我們」用法解析
-辨識度高的職業外觀特徵
-雷射男的特殊眼鏡
-電池板塊走勢與科技股影響
-SD LoRA 訓練步數建議
-支氣管炎後背酸痛原因與舒緩
-五十音測驗 App 程式碼
-雅各書1:27 不沾染世俗釋義
-電腦主機搭機攜帶規定
-詩篇102:24 中年去世的意義
-腸胃炎支氣管炎飲食指南
-腸胃炎冷汗無力處理建議
-信心進入神的安息
-圣经地平说与宇宙象征
-發燒咳嗽腹瀉，非腸病毒
-和 Gemini 的對話
-新策略更新
-
-左側進場策略:前一兩天縮量至新低，前一兩天RSI出現近5日底部，且當日收盤站上MA5，且MA20>MA10和MA5，符合溫度低於35，可以兩層底倉入場。
-
-
-
-右側進場策略:放量且突破MA20，並且均線健康MA5>MA10>MA20>MA60，溫度35到80之間，直接建倉4層
-
-
-
-中間段
-
-一旦站上MA20馬上加到8層
-
-剩下兩層每次回MA10，且前3天沒有縮量跡象就加一層
-
-
-
-離場訊號: 高溫區域且當日收盤前15分鐘跌且破MA5，同時5日的量比線(縮量)和MA5線(上漲)背離，立即清倉。
-
-
-
-另外讓系統記得我前一次設定的回測時間段。
-
-幫我更改並且給我完整程式碼。
-
-這份更新後的策略檔案已經準備完畢。
-
-「PY」圖示
-updated_strategy
- PY 
-開啟
-我已經根據你的需求修改了核心邏輯。新版本整合了左側與右側的進場條件。系統現在具備自動記憶回測時間區段的功能。你可以直接下載並運行這個 Python 檔案。
-
-策略更新重點如下：
-
-左側進場：系統會檢測近兩日是否出現縮量新低與 RSI 底部。當價格站上 MA5 且均線符合條件時，系統自動建倉兩層。
-
-右側進場：系統會監控放量與 MA20 突破訊號。若均線呈現多頭排列且溫度適中，系統直接建立四層倉位。
-
-中段加碼：價格一旦站上 MA20，系統迅速將倉位補至八層。剩餘兩層資金會在價格回測 MA10 且無明顯縮量時投入。
-
-離場機制：當指標進入高溫區、價格跌破 MA5、收盤呈現下跌，且量價出現背離時，系統會立即清倉。
-
-狀態記憶：資料庫現在會儲存前次設定的回測起始與結束日期。介面載入時會自動套用這些設定。
-
-
-
-
-Gemini 是 AI，有時可能會出錯。
-
 import os
 import json
 import time
@@ -377,7 +267,7 @@ class TradingStrategyEngine:
         return df
 
 # ==========================================
-# 3. 歷史回測引擎 (精準右側進場與嚴格左側防護版)
+# 3. 歷史回測引擎 (左右碼混合與分層加碼)
 # ==========================================
 class StrategyBacktester:
     def __init__(self, df: pd.DataFrame, initial_capital: float = 200000.0, start_date: str = None, end_date: str = None):
@@ -427,7 +317,7 @@ class StrategyBacktester:
             prev_vol_ma5 = float(yesterday['Vol_MA5']) if not np.isnan(yesterday['Vol_MA5']) else float(yesterday['Volume'])
 
             # ==========================================
-            # 1. 出場與減倉機制
+            # 1. 出場機制
             # ==========================================
             sold_today = False
             if layers_held > 0:
@@ -439,7 +329,7 @@ class StrategyBacktester:
                 vol_shrinking = vol_ma5 < prev_vol_ma5
                 ma5_rising = ma5 > yesterday_ma5
 
-                # 🔥 1. 離場訊號：高溫、收跌、破MA5、量縮價漲背離
+                # 離場訊號：高溫區域 + 當日跌破 MA5 + 5日量比線(縮量)與 MA5(上漲)背離
                 if is_high_temp and is_down_day and broken_ma5 and vol_shrinking and ma5_rising:
                     sell_amount = shares * price
                     pnl = sell_amount - (shares * avg_cost)
@@ -452,12 +342,12 @@ class StrategyBacktester:
                     sold_today = True
 
                     trades.append({
-                        "Date": date, "日期": date_str, "動作": "清倉離場", "類別": "Sell", "原因": "🔥 觸發背離高溫清倉訊號", 
+                        "Date": date, "日期": date_str, "動作": "清倉離場", "類別": "Sell", "原因": "🔥 高溫+破MA5+量縮價漲背離", 
                         "成交價": price, "股數": sell_shares, "損益": round(pnl, 2), "報酬率": f"{unrealized_pct:+.2f}%", 
                         "當下倉位": "0 股 (0.0%)", "剩餘現金": round(cash, 2)
                     })
 
-                # 🛑 2. 8% 硬停損
+                # 8% 風險硬停損
                 elif unrealized_pct <= -8.0:
                     sell_amount = shares * price
                     pnl = sell_amount - (shares * avg_cost)
@@ -489,7 +379,7 @@ class StrategyBacktester:
             # 2. 進場與加倉機制
             # ==========================================
             if layers_held == 0:
-                # 🥶 左側進場判斷
+                # 左側進場判斷
                 vol_recent_2 = prev_10['Volume'].iloc[-2:] if len(prev_10) >= 2 else pd.Series([float('inf')])
                 vol_older_5 = prev_10['Volume'].iloc[-7:-2] if len(prev_10) >= 7 else pd.Series([0])
                 vol_new_low = vol_recent_2.min() < vol_older_5.min() if len(vol_older_5) > 0 else False
@@ -500,7 +390,7 @@ class StrategyBacktester:
                 
                 left_cond = vol_new_low and rsi_bottom and (price > ma5) and (ma20 > ma10) and (ma20 > ma5) and (temp < 35.0)
                 
-                # 🚀 右側進場判斷
+                # 右側進場判斷
                 high_vol = today['Volume'] > vol_ma5 * 1.5
                 breakout_ma20 = (price > ma20) and (yesterday_close <= yesterday_ma20)
                 ma_healthy = (ma5 > ma10) and (ma10 > ma20) and (ma20 > ma60)
@@ -519,7 +409,7 @@ class StrategyBacktester:
                         curr_val = cash + (shares * price)
                         pos_pct = (shares * price / curr_val * 100) if curr_val > 0 else 0
                         trades.append({
-                            "Date": date, "日期": date_str, "動作": "建倉兩層(20%)", "類別": "Buy", "原因": "🥶 左側縮量抄底", 
+                            "Date": date, "日期": date_str, "動作": "建倉兩層(20%)", "類別": "Buy", "原因": "🥶 左側縮量抄底 (底溫+破5日新低)", 
                             "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%", 
                             "當下倉位": f"{shares:,} 股 ({pos_pct:.1f}%)", "剩餘現金": round(cash, 2)
                         })
@@ -537,13 +427,13 @@ class StrategyBacktester:
                         curr_val = cash + (shares * price)
                         pos_pct = (shares * price / curr_val * 100) if curr_val > 0 else 0
                         trades.append({
-                            "Date": date, "日期": date_str, "動作": "建倉四層(40%)", "類別": "Buy", "原因": "🚀 右側突破建倉", 
+                            "Date": date, "日期": date_str, "動作": "建倉四層(40%)", "類別": "Buy", "原因": "🚀 右側突破建倉 (放量突破+均線多頭)", 
                             "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%", 
                             "當下倉位": f"{shares:,} 股 ({pos_pct:.1f}%)", "剩餘現金": round(cash, 2)
                         })
 
             elif layers_held > 0:
-                # 📈 中段：站上MA20加到8層
+                # 中段：站上 MA20 馬上補到 8 層
                 if layers_held < 8 and price > ma20:
                     layers_to_add = 8 - layers_held
                     budget = self.initial_capital * (layers_to_add * 0.10)
@@ -558,12 +448,12 @@ class StrategyBacktester:
                         curr_val = cash + (shares * price)
                         pos_pct = (shares * price / curr_val * 100) if curr_val > 0 else 0
                         trades.append({
-                            "Date": date, "日期": date_str, "動作": "加碼至八層(80%)", "類別": "Buy", "原因": "📈 站上 MA20 迅速加碼", 
+                            "Date": date, "日期": date_str, "動作": "加碼至八層(80%)", "類別": "Buy", "原因": "📈 站上 MA20 快速加碼", 
                             "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%", 
                             "當下倉位": f"{shares:,} 股 ({pos_pct:.1f}%)", "剩餘現金": round(cash, 2)
                         })
 
-                # 💧 中段：回測MA10加滿剩餘兩層
+                # 中段：回測 MA10 加碼剩餘兩層
                 elif layers_held >= 8 and layers_held < 10:
                     pullback_ma10 = (low <= ma10)
                     vol_last_3 = prev_10['Volume'].iloc[-3:] if len(prev_10) >= 3 else []
@@ -588,7 +478,7 @@ class StrategyBacktester:
                             curr_val = cash + (shares * price)
                             pos_pct = (shares * price / curr_val * 100) if curr_val > 0 else 0
                             trades.append({
-                                "Date": date, "日期": date_str, "動作": f"加碼一層(10%)", "類別": "Buy", "原因": "💧 回測 MA10 且無縮量加碼", 
+                                "Date": date, "日期": date_str, "動作": f"加碼一層(10%)", "類別": "Buy", "原因": "💧 回測 MA10 且前3日無縮量", 
                                 "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%", 
                                 "當下倉位": f"{shares:,} 股 ({pos_pct:.1f}%)", "剩餘現金": round(cash, 2)
                             })
@@ -773,7 +663,7 @@ if st.button("🚀 開始歷史回測模擬", type="primary"):
     start_str = bt_start.strftime("%Y-%m-%d")
     end_str = bt_end.strftime("%Y-%m-%d")
     
-    # 記憶回測時間段
+    # 記憶回測時間區段
     db["bt_start"] = start_str
     db["bt_end"] = end_str
     save_db(db)
@@ -907,5 +797,3 @@ if st.button("🚀 開始歷史回測模擬", type="primary"):
 
         except Exception as ex:
             st.error(f"執行歷史回測失敗: {ex}")
-updated_strategy.py
-目前顯示的是「updated_strategy.py」。
