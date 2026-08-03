@@ -7,6 +7,7 @@ import numpy as np
 import yfinance as yf
 import streamlit as st
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 
 # 載入原生拖曳元件
@@ -283,7 +284,6 @@ class StrategyBacktester:
         shares = 0
         avg_cost = 0.0
         
-        # 策略狀態標記
         took_profit_15 = False
         took_atr_profit = False
         highest_price_since_entry = 0.0
@@ -315,24 +315,19 @@ class StrategyBacktester:
             yesterday_close = float(yesterday['Close'])
             yesterday_ma10 = float(yesterday['MA10']) if not np.isnan(yesterday['MA10']) else yesterday_close
 
-            # RSI 背離計算
             price_low_10 = low < prev_10['Low'].min()
             min_rsi_10 = prev_10['RSI14'].min()
             rsi_bullish_div = price_low_10 and (rsi14 > min_rsi_10)
 
-            # 更新最高價
             if shares > 0:
                 if price > highest_price_since_entry:
                     highest_price_since_entry = price
 
-            # ==========================================
-            # 1. 離場與減倉機制
-            # ==========================================
+            # 出場與減倉機制
             sold_today = False
             if shares > 0:
                 unrealized_pct = ((price - avg_cost) / avg_cost) * 100.0
 
-                # A. 盈利超過 15% 減倉 50% (觸發後開啟 MA20 移動清倉機制)
                 if unrealized_pct >= 15.0 and not took_profit_15:
                     sell_shares = int(shares * 0.5)
                     if sell_shares > 0:
@@ -342,18 +337,17 @@ class StrategyBacktester:
                         shares -= sell_shares
                         took_profit_15 = True
                         trades.append({
-                            "日期": date_str, "動作": "減碼50%", "原因": "💰 盈利超15%鎖利 (啟動MA20防守)", 
+                            "Date": date, "日期": date_str, "動作": "減碼50%", "類別": "Sell", "原因": "💰 盈利超15%鎖利", 
                             "成交價": price, "股數": sell_shares, "損益": pnl, "報酬率": f"{unrealized_pct:+.2f}%", "剩餘現金": cash
                         })
 
-                # B. 沸點反轉全清倉 (T > 95°C 且 跌破前日低點 或 跌破 MA5)
                 if temp > 95.0 and (price < yesterday_low or price < ma5):
                     sell_amount = shares * price
                     pnl = sell_amount - (shares * avg_cost)
                     pnl_pct = (pnl / (shares * avg_cost)) * 100
                     cash += sell_amount
                     trades.append({
-                        "日期": date_str, "動作": "全數賣出", "原因": "🔥 沸點反轉全清倉 (T>95°C)", 
+                        "Date": date, "日期": date_str, "動作": "全數賣出", "類別": "Sell", "原因": "🔥 沸點反轉全清倉", 
                         "成交價": price, "股數": shares, "損益": pnl, "報酬率": f"{pnl_pct:+.2f}%", "剩餘現金": cash
                     })
                     shares = 0
@@ -364,14 +358,13 @@ class StrategyBacktester:
                     took_atr_profit = False
                     sold_today = True
 
-                # C. MA20 生命線清倉：僅在「收益已達15%之後」才生效！
                 elif took_profit_15 and price < ma20:
                     sell_amount = shares * price
                     pnl = sell_amount - (shares * avg_cost)
                     pnl_pct = (pnl / (shares * avg_cost)) * 100
                     cash += sell_amount
                     trades.append({
-                        "日期": date_str, "動作": "清倉離場", "原因": "🚨 獲利後跌破 MA20 生命線清倉", 
+                        "Date": date, "日期": date_str, "動作": "清倉離場", "類別": "Sell", "原因": "🚨 跌破 MA20 清倉", 
                         "成交價": price, "股數": shares, "損益": pnl, "報酬率": f"{pnl_pct:+.2f}%", "剩餘現金": cash
                     })
                     shares = 0
@@ -382,7 +375,6 @@ class StrategyBacktester:
                     took_atr_profit = False
                     sold_today = True
 
-                # D. 極端高溫動態保險絲 (自最高點回撤達 2.5 倍 ATR)
                 elif not took_atr_profit and highest_price_since_entry > 0 and (highest_price_since_entry - price) >= (2.5 * atr14):
                     sell_shares = int(shares * 0.5)
                     if sell_shares > 0:
@@ -392,7 +384,7 @@ class StrategyBacktester:
                         shares -= sell_shares
                         took_atr_profit = True
                         trades.append({
-                            "日期": date_str, "動作": "減碼50%", "原因": "🛡️ 自高點回撤 2.5x ATR 保險絲觸發", 
+                            "Date": date, "日期": date_str, "動作": "減碼50%", "類別": "Sell", "原因": "🛡️ 2.5x ATR 保險絲", 
                             "成交價": price, "股數": sell_shares, "損益": pnl, "報酬率": f"{unrealized_pct:+.2f}%", "剩餘現金": cash
                         })
 
@@ -406,11 +398,8 @@ class StrategyBacktester:
                 })
                 continue
 
-            # ==========================================
-            # 2. 進場與加倉機制 (高溫 T > 80°C 嚴禁買進)
-            # ==========================================
+            # 進場與加倉機制
             if temp <= 80.0:
-                # --- 第一步：極寒抄底 (試錯底倉 15%) ---
                 if shares == 0:
                     if rsi_bullish_div and temp < 35.0:
                         buy_budget = self.initial_capital * 0.15
@@ -425,13 +414,11 @@ class StrategyBacktester:
                             took_profit_15 = False
                             took_atr_profit = False
                             trades.append({
-                                "日期": date_str, "動作": "建倉(15%)", "原因": "🥶 極寒抄底 (RSI背離 + T<35°C)", 
+                                "Date": date, "日期": date_str, "動作": "建倉(15%)", "類別": "Buy", "原因": "🥶 極寒抄底 (T<35°C)", 
                                 "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%", "剩餘現金": cash
                             })
 
-                # --- 既有部位之加碼機制 ---
                 elif shares > 0 and cash >= (price * 100):
-                    # 15% 底倉建立後的動態加碼：每跌 10% 或每漲 5% 加倉 1 層 (約 10% 資金)
                     price_change_from_last = (price - last_add_price) / last_add_price
                     if price_change_from_last <= -0.10 or price_change_from_last >= 0.05:
                         add_budget = self.initial_capital * 0.10
@@ -443,11 +430,10 @@ class StrategyBacktester:
                             cash -= (add_shares * price)
                             last_add_price = price
                             trades.append({
-                                "日期": date_str, "動作": "加碼1層", "原因": f"📈 動態加碼 (價格變動 {price_change_from_last:+.1f}%)", 
+                                "Date": date, "日期": date_str, "動作": "加碼1層", "類別": "Buy", "原因": f"📈 動態加碼 ({price_change_from_last:+.1f}%)", 
                                 "成交價": price, "股數": add_shares, "損益": 0.0, "報酬率": "0.00%", "剩餘現金": cash
                             })
 
-                    # --- 第二步：黃金突破 (第一次破 MA10 且未破新低，剩餘資金單次打滿) ---
                     breakout_ma10 = (price > ma10) and (yesterday_close <= yesterday_ma10)
                     not_new_low = low >= prev_10['Low'].min()
                     
@@ -460,7 +446,7 @@ class StrategyBacktester:
                             cash -= (add_shares * price)
                             last_add_price = price
                             trades.append({
-                                "日期": date_str, "動作": "黃金突破打滿", "原因": "🚀 突破 MA10 且未破新低 (35°C≤T≤80°C)", 
+                                "Date": date, "日期": date_str, "動作": "黃金突破打滿", "類別": "Buy", "原因": "🚀 黃金突破打滿", 
                                 "成交價": price, "股數": add_shares, "損益": 0.0, "報酬率": "0.00%", "剩餘現金": cash
                             })
 
@@ -475,8 +461,7 @@ class StrategyBacktester:
         df_equity = pd.DataFrame(equity_curve).set_index("Date")
         df_trades = pd.DataFrame(trades)
         
-        return df_equity, df_trades
-
+        return df_equity, df_trades, df
 
 # ==========================================
 # 4. 本地 JSON 數據庫管理者
@@ -535,18 +520,10 @@ def load_db():
         save_db(default_db)
         return default_db
 
-
 # ==========================================
 # 5. Streamlit GUI 主介面
 # ==========================================
 st.set_page_config(page_title="動態溫控策略回測系統", layout="wide", page_icon="📜")
-st.markdown("""
-    <style>
-        [data-testid="stSidebar"] > div:first-child {
-            padding-bottom: 150px;
-        }
-    </style>
-""", unsafe_allow_html=True)
 
 if "db" not in st.session_state:
     st.session_state.db = load_db()
@@ -580,8 +557,6 @@ if hasattr(st, "dialog"):
     if HAS_SORTABLES:
         if st.sidebar.button("↕️ 調整自選清單順序"):
             reorder_modal()
-    else:
-        st.sidebar.error("請先安裝拖曳庫：pip install streamlit-sortables")
 
 st.sidebar.markdown("---")
 
@@ -604,8 +579,6 @@ with st.sidebar.expander("➕ 新增標的", expanded=False):
                 st.rerun()
             else:
                 st.sidebar.warning(f"⚠️ {new_sym} 已存在於自選庫中！")
-        else:
-            st.sidebar.error("❌ 請輸入標的代碼！")
 
 if db.get("stocks"):
     del_sym = st.sidebar.selectbox(
@@ -624,7 +597,6 @@ if db.get("stocks"):
 
 # ----------------- 主介面：歷史區間回測 -----------------
 st.title("📜 個股歷史策略模擬與回測系統")
-st.caption("防守機制已更新：跌破 MA20 清倉僅在【獲利超15%減碼後】才會啟動。")
 
 col_bt1, col_bt2, col_bt3 = st.columns([2, 2, 2])
 with col_bt1:
@@ -658,7 +630,7 @@ if st.button("🚀 開始歷史回測模擬", type="primary"):
                 st.error("歷史數據不足，無法執行回測。請確認代碼或重新選擇區間。")
             else:
                 backtester = StrategyBacktester(df_bt_raw, initial_capital=bt_capital, start_date=start_str, end_date=end_str)
-                df_equity, df_trades = backtester.run()
+                df_equity, df_trades, df_kline = backtester.run()
 
                 if df_equity.empty:
                     st.warning("選定日期區間內沒有可用的交易日行情數據。")
@@ -693,27 +665,95 @@ if st.button("🚀 開始歷史回測模擬", type="primary"):
                     b4.metric("最大資產回撤 (MDD)", f"{max_drawdown:.2f}%")
                     b5.metric("出場/減碼勝率", f"{win_rate:.1f}%", f"共 {total_closed} 次操作")
 
+                    # ==========================================
+                    # 🔥 NEW: Buy/Sell 點位與 K 線對照圖
+                    # ==========================================
+                    st.markdown("---")
+                    st.markdown("#### 🎯 K 線與 Buy / Sell 交易點位圖")
+
+                    df_kline_sub = df_kline.loc[start_str:end_str]
+                    
+                    fig_kline = make_subplots(rows=1, cols=1, shared_xaxes=True)
+
+                    # 1. K 線圖
+                    fig_kline.add_trace(go.Candlestick(
+                        x=df_kline_sub.index,
+                        open=df_kline_sub['Open'], high=df_kline_sub['High'],
+                        low=df_kline_sub['Low'], close=df_kline_sub['Close'],
+                        name='K線',
+                        increasing_line_color='#26a69a', decreasing_line_color='#ef5350'
+                    ))
+
+                    # 2. 均線 MA5 / MA10 / MA20
+                    fig_kline.add_trace(go.Scatter(x=df_kline_sub.index, y=df_kline_sub['MA5'], mode='lines', name='MA5', line=dict(color='#FF9800', width=1)))
+                    fig_kline.add_trace(go.Scatter(x=df_kline_sub.index, y=df_kline_sub['MA10'], mode='lines', name='MA10', line=dict(color='#2196F3', width=1)))
+                    fig_kline.add_trace(go.Scatter(x=df_kline_sub.index, y=df_kline_sub['MA20'], mode='lines', name='MA20', line=dict(color='#9C27B0', width=1.5)))
+
+                    # 3. 繪製買賣標記點
+                    if not df_trades.empty:
+                        buys = df_trades[df_trades['類別'] == 'Buy']
+                        sells = df_trades[df_trades['類別'] == 'Sell']
+
+                        # 買點標籤 (綠色三角形向上)
+                        if not buys.empty:
+                            fig_kline.add_trace(go.Scatter(
+                                x=buys['Date'],
+                                y=buys['成交價'] * 0.98,
+                                mode='markers+text',
+                                name='買進/加碼',
+                                marker=dict(symbol='triangle-up', size=14, color='#00E676'),
+                                text=buys['動作'],
+                                textposition='bottom center',
+                                hovertext=buys['原因']
+                            ))
+
+                        # 賣點標籤 (紅色三角形向下)
+                        if not sells.empty:
+                            fig_kline.add_trace(go.Scatter(
+                                x=sells['Date'],
+                                y=sells['成交價'] * 1.02,
+                                mode='markers+text',
+                                name='賣出/減碼',
+                                marker=dict(symbol='triangle-down', size=14, color='#FF1744'),
+                                text=sells['動作'],
+                                textposition='top center',
+                                hovertext=sells['原因']
+                            ))
+
+                    fig_kline.update_layout(
+                        title=f"{bt_symbol} 交易訊號發布對照圖",
+                        xaxis_title="日期",
+                        yaxis_title="價格",
+                        xaxis_rangeslider_visible=False,
+                        hovermode="x unified",
+                        template="plotly_white",
+                        height=550
+                    )
+                    st.plotly_chart(fig_kline, use_container_width=True)
+
+                    # ----------------- 權益曲線圖 -----------------
                     st.markdown("---")
                     st.markdown("#### 📈 資產淨值成長曲線 vs 買入持有對照")
 
-                    fig = go.Figure()
-                    fig.add_trace(go.Scatter(x=df_equity.index, y=df_equity["策略資產淨值"], mode='lines', name='動態溫控策略', line=dict(color='#2962FF', width=2)))
-                    fig.add_trace(go.Scatter(x=df_equity.index, y=df_equity["買入持有基準"], mode='lines', name='買入持有基準 (Buy & Hold)', line=dict(color='#B0BEC5', width=1.5, dash='dash')))
+                    fig_eq = go.Figure()
+                    fig_eq.add_trace(go.Scatter(x=df_equity.index, y=df_equity["策略資產淨值"], mode='lines', name='動態溫控策略', line=dict(color='#2962FF', width=2)))
+                    fig_eq.add_trace(go.Scatter(x=df_equity.index, y=df_equity["買入持有基準"], mode='lines', name='買入持有基準 (Buy & Hold)', line=dict(color='#B0BEC5', width=1.5, dash='dash')))
 
-                    fig.update_layout(
+                    fig_eq.update_layout(
                         title=f"{bt_symbol} 策略與大盤持有權益對比圖 ({start_str} ~ {end_str})",
                         xaxis_title="日期",
                         yaxis_title="資產總淨值",
                         hovermode="x unified",
                         template="plotly_white",
-                        height=450
+                        height=400
                     )
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig_eq, use_container_width=True)
 
                     st.markdown("---")
                     st.markdown("#### 📜 模擬交易進出場明細")
                     if not df_trades.empty:
-                        st.dataframe(df_trades, use_container_width=True, hide_index=True)
+                        display_df = df_trades.drop(columns=['Date', '類別'], errors='ignore')
+                        st.dataframe(display_df, use_container_width=True, hide_index=True)
                     else:
                         st.info("於此歷史區間內，未觸發任何買賣進場條件。")
 
