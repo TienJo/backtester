@@ -266,7 +266,7 @@ class TradingStrategyEngine:
         return df
 
 # ==========================================
-# 3. 歷史回測引擎 (完美斜率與冷卻防禦版)
+# 3. 歷史回測引擎 (僅保留 MA5 3日斜率<-2.5%防護)
 # ==========================================
 class StrategyBacktester:
     def __init__(self, df: pd.DataFrame, initial_capital: float = 200000.0, start_date: str = None, end_date: str = None):
@@ -287,11 +287,8 @@ class StrategyBacktester:
         took_profit_15 = False
         took_atr_profit = False
         has_crossed_ma20 = False
-        cooldown_counter = 0        # 🛡️ 清倉冷卻計數器
+        cooldown_counter = 0        # 清倉冷卻計數器
         last_trade_was_loss = False # 紀錄上一筆是否停損
-        
-        # 📐 均線斜率防守參數：MA20 5日下彎斜率超過 -1.5% 時禁止左側抄底
-        ma20_slope_threshold = -1.5
         
         highest_price_since_entry = 0.0
         last_add_price = 0.0
@@ -317,7 +314,6 @@ class StrategyBacktester:
             ma5 = float(today['MA5']) if not np.isnan(today['MA5']) else price
             ma10 = float(today['MA10']) if not np.isnan(today['MA10']) else price
             ma20 = float(today['MA20']) if not np.isnan(today['MA20']) else price
-            ma60 = float(today['MA60']) if not np.isnan(today['MA60']) else price
             rsi14 = float(today['RSI14']) if not np.isnan(today['RSI14']) else 50.0
             temp = float(today['Temperature']) if not np.isnan(today['Temperature']) else 50.0
             atr14 = float(today['ATR14']) if not np.isnan(today['ATR14']) else 0.0
@@ -329,12 +325,12 @@ class StrategyBacktester:
             if cooldown_counter > 0:
                 cooldown_counter -= 1
 
-            # 📐 計算 MA20 的 5 日變化斜率百分比
-            if i >= 25:
-                ma20_5d_ago = float(df.iloc[i-5]['MA20'])
-                ma20_slope_5d = ((ma20 - ma20_5d_ago) / ma20_5d_ago) * 100.0 if ma20_5d_ago > 0 else 0.0
+            # 📐 計算 MA5 的 3 日斜率百分比 (捕捉短線急跌)
+            if i >= 23:
+                ma5_3d_ago = float(df.iloc[i-3]['MA5'])
+                ma5_slope_3d = ((ma5 - ma5_3d_ago) / ma5_3d_ago) * 100.0 if ma5_3d_ago > 0 else 0.0
             else:
-                ma20_slope_5d = 0.0
+                ma5_slope_3d = 0.0
 
             # RSI 底背離計算
             price_low_20 = low < prev_20['Low'].min()
@@ -380,7 +376,7 @@ class StrategyBacktester:
                         "當下倉位": "0 股 (0.0%)", "剩餘現金": round(cash, 2)
                     })
 
-                # 🚨 2. MA20 生命線清倉 (避開草創期誤殺)
+                # 🚨 2. MA20 生命線清倉
                 elif (has_crossed_ma20 or took_profit_15 or took_atr_profit) and price < ma20:
                     sell_amount = shares * price
                     pnl = sell_amount - (shares * avg_cost)
@@ -475,18 +471,18 @@ class StrategyBacktester:
                 continue
 
             # ==========================================
-            # 2. 進場與加倉機制 (斜率過濾 + 冷卻期)
+            # 2. 進場與加倉機制 (MA5 斜率過濾 + 冷卻期)
             # ==========================================
             if cooldown_counter == 0 and temp <= 80.0:
                 
-                # 📐 斜率過濾：當 MA20 5日內跌幅超過門檻（例如 -1.5%），視為急殺陡峭下彎
-                is_steep_downtrend = (ma20_slope_5d <= ma20_slope_threshold)
+                # 📐 核心修改：MA5 3 天內下彎斜率 > 2.5% (即 ma5_slope_3d <= -2.5%) 時，判定為急跌殺多
+                is_steep_downtrend = (ma5_slope_3d <= -2.5)
 
                 # 第一步：🥶 極寒抄底
                 if shares == 0:
                     strict_rsi_cond = (rsi_diff > 20.0 and price > ma5) if last_trade_was_loss else True
 
-                    # 🚫 當 MA20 下彎斜率過於陡峭時，強制禁止抄底
+                    # 🚫 當 MA5 下彎斜率過陡 (is_steep_downtrend) 時，強制禁止抄底
                     if rsi_bullish_div and temp < 35.0 and is_bullish_candle and strict_rsi_cond and not is_steep_downtrend:
                         buy_budget = self.initial_capital * 0.15
                         buy_shares = int(buy_budget / price)
@@ -504,7 +500,7 @@ class StrategyBacktester:
                             curr_val = cash + (shares * price)
                             pos_pct = (shares * price / curr_val * 100) if curr_val > 0 else 0
                             trades.append({
-                                "Date": date, "日期": date_str, "動作": "建倉(15%)", "類別": "Buy", "原因": f"🥶 極寒抄底 (斜率{ma20_slope_5d:.1f}%正常)", 
+                                "Date": date, "日期": date_str, "動作": "建倉(15%)", "類別": "Buy", "原因": f"🥶 極寒抄底 (MA5斜率{ma5_slope_3d:.1f}%正常)", 
                                 "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%", 
                                 "當下倉位": f"{shares:,} 股 ({pos_pct:.1f}%)", "剩餘現金": round(cash, 2)
                             })
