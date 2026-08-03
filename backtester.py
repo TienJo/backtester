@@ -266,7 +266,7 @@ class TradingStrategyEngine:
         return df
 
 # ==========================================
-# 3. 歷史回測引擎 (精準右側進場與嚴格左側防護版)
+# 3. 歷史回測引擎 (連2天站穩 + 1.5%緩衝防洗版)
 # ==========================================
 class StrategyBacktester:
     def __init__(self, df: pd.DataFrame, initial_capital: float = 200000.0, start_date: str = None, end_date: str = None):
@@ -371,7 +371,7 @@ class StrategyBacktester:
                     took_profit_15 = False
                     took_atr_profit = False
                     has_crossed_ma20 = False
-                    cooldown_counter = 5
+                    cooldown_counter = 3
                     last_trade_was_loss = True
                     sold_today = True
 
@@ -381,8 +381,9 @@ class StrategyBacktester:
                         "當下倉位": "0 股 (0.0%)", "剩餘現金": round(cash, 2)
                     })
 
-                # 🚨 2. MA20 生命線清倉
-                elif (has_crossed_ma20 or took_profit_15 or took_atr_profit) and price < ma20:
+                # 🚨 2. MA20 生命線清倉 (加入 1.5% 跌破緩衝區，避免影線洗盤)
+                # 條件：收盤價實質跌破 MA20 達 1.5% 以上 (price < ma20 * 0.985)
+                elif (has_crossed_ma20 or took_profit_15 or took_atr_profit) and (price < ma20 * 0.985):
                     sell_amount = shares * price
                     pnl = sell_amount - (shares * avg_cost)
                     cash += sell_amount
@@ -395,12 +396,12 @@ class StrategyBacktester:
                     took_profit_15 = False
                     took_atr_profit = False
                     has_crossed_ma20 = False
-                    cooldown_counter = 5
+                    cooldown_counter = 3
                     last_trade_was_loss = (pnl < 0)
                     sold_today = True
 
                     trades.append({
-                        "Date": date, "日期": date_str, "動作": "清倉離場", "類別": "Sell", "原因": "🚨 跌破 MA20 生命線清倉", 
+                        "Date": date, "日期": date_str, "動作": "清倉離場", "類別": "Sell", "原因": "🚨 實質跌破 MA20 (超過1.5%)", 
                         "成交價": price, "股數": sell_shares, "損益": round(pnl, 2), "報酬率": f"{unrealized_pct:+.2f}%", 
                         "當下倉位": "0 股 (0.0%)", "剩餘現金": round(cash, 2)
                     })
@@ -419,7 +420,7 @@ class StrategyBacktester:
                     took_profit_15 = False
                     took_atr_profit = False
                     has_crossed_ma20 = False
-                    cooldown_counter = 5
+                    cooldown_counter = 3
                     last_trade_was_loss = False
                     sold_today = True
 
@@ -507,12 +508,17 @@ class StrategyBacktester:
                                 "當下倉位": f"{shares:,} 股 ({pos_pct:.1f}%)", "剩餘現金": round(cash, 2)
                             })
 
-                    # 📈 方式 B：右側強勢突破 (加入 MA20 翻揚與 5日新高雙重濾網，建倉 30%)
+                    # 📈 方式 B：右側強勢突破 (需要連續 2 天收盤價站穩 MA20 + 創 5 日新高)
                     elif price > ma20 and (ma5 > ma10) and is_bullish_candle:
+                        yesterday_price = float(yesterday['Close'])
+                        yesterday_ma20_val = float(yesterday['MA20']) if not np.isnan(yesterday['MA20']) else yesterday_price
+                        
+                        # 關鍵雙重濾網：1. 今日與昨日皆站上 MA20  2. MA20 翻揚  3. 創近 5 日新高
+                        hold_above_ma20_2days = (price > ma20) and (yesterday_price > yesterday_ma20_val)
                         ma20_turning_up = ma20 >= yesterday_ma20
                         is_5d_high = price >= prev_10['Close'].iloc[-5:].max()
 
-                        if ma20_turning_up and is_5d_high:
+                        if hold_above_ma20_2days and ma20_turning_up and is_5d_high:
                             buy_budget = self.initial_capital * 0.30
                             buy_shares = int(buy_budget / price)
                             if buy_shares > 0 and cash >= buy_shares * price:
@@ -529,7 +535,7 @@ class StrategyBacktester:
                                 curr_val = cash + (shares * price)
                                 pos_pct = (shares * price / curr_val * 100) if curr_val > 0 else 0
                                 trades.append({
-                                    "Date": date, "日期": date_str, "動作": "建倉(30%)", "類別": "Buy", "原因": "🚀 右側突破 (MA20翻揚+創5日新高)", 
+                                    "Date": date, "日期": date_str, "動作": "建倉(30%)", "類別": "Buy", "原因": "🚀 右側突破 (連2天站穩MA20+創5日新高)", 
                                     "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%", 
                                     "當下倉位": f"{shares:,} 股 ({pos_pct:.1f}%)", "剩餘現金": round(cash, 2)
                                 })
