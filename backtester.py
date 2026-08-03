@@ -17,7 +17,7 @@ except ImportError:
     HAS_SORTABLES = False
 
 # ==========================================
-# 1. 多重備援行情數據引擎 (加入快取機制避免卡頓)
+# 1. 多重備援行情數據引擎 (修正快取參數)
 # ==========================================
 class MultiSourceMarketData:
     def __init__(self):
@@ -196,13 +196,13 @@ class MultiSourceMarketData:
 
 data_engine = MultiSourceMarketData()
 
-# 快取數據抓取，避免每次操作都卡頓
+# 正確快取：將所有查詢條件作為 Key，避免時間切換無效
 @st.cache_data(ttl=300)
 def cached_fetch_ohlc(symbol: str, start_date: str = None, end_date: str = None):
     return data_engine.fetch_ohlc(symbol, start_date, end_date)
 
 # ==========================================
-# 2. 動態溫控主升段最大化策略引擎
+# 2. 動態溫控主升段策略引擎
 # ==========================================
 class TradingStrategyEngine:
     @staticmethod
@@ -388,11 +388,19 @@ class TradingStrategyEngine:
 
 
 # ==========================================
-# 3. 歷史回測引擎
+# 3. 歷史回測引擎 (修復重複當沖買賣與時間截取Bug)
 # ==========================================
 class StrategyBacktester:
-    def __init__(self, df: pd.DataFrame, initial_capital: float = 200000.0):
-        self.df = TradingStrategyEngine.calculate_indicators(df)
+    def __init__(self, df: pd.DataFrame, initial_capital: float = 200000.0, start_date: str = None, end_date: str = None):
+        # 先計算好全量數據的技術指標
+        df_calc = TradingStrategyEngine.calculate_indicators(df)
+        
+        # 截取用戶指定的歷史區間進行回測（確保包含前面60天計算指標）
+        if start_date and end_date:
+            self.df = df_calc.loc[start_date:end_date]
+        else:
+            self.df = df_calc
+            
         self.initial_capital = initial_capital
 
     def run(self):
@@ -404,7 +412,10 @@ class StrategyBacktester:
         trades = []
         equity_curve = []
         
-        for i in range(60, len(df)):
+        for i in range(len(df)):
+            if i < 10:  # 確保有足夠的前10天資料計算背離
+                continue
+                
             date = df.index[i]
             date_str = date.strftime("%Y-%m-%d")
             today = df.iloc[i]
@@ -416,12 +427,12 @@ class StrategyBacktester:
             low = float(today['Low'])
             volume = float(today['Volume'])
             
-            ma5 = float(today['MA5'])
-            ma20 = float(today['MA20'])
-            rsi14 = float(today['RSI14'])
-            temp = float(today['Temperature'])
+            ma5 = float(today['MA5']) if not np.isnan(today['MA5']) else price
+            ma20 = float(today['MA20']) if not np.isnan(today['MA20']) else price
+            rsi14 = float(today['RSI14']) if not np.isnan(today['RSI14']) else 50.0
+            temp = float(today['Temperature']) if not np.isnan(today['Temperature']) else 50.0
             high_20 = float(today['High_20']) if not np.isnan(today['High_20']) else high
-            ma10_vol_prev = float(yesterday['MA10_Vol'])
+            ma10_vol_prev = float(yesterday['MA10_Vol']) if not np.isnan(yesterday['MA10_Vol']) else volume
             yesterday_low = float(yesterday['Low'])
             
             vol_ratio = volume / ma10_vol_prev if ma10_vol_prev > 0 else 0.0
@@ -430,10 +441,12 @@ class StrategyBacktester:
             rsi_not_low_10 = rsi14 > prev_10['RSI14'].min()
             rsi_bullish_div = price_low_10 and rsi_not_low_10 and (rsi14 < 45)
             
-            # 1. 離場風控檢查
+            # 1. 出場清倉機制 (賣出後必須 continue，防止當天被立刻買回)
+            sold_today = False
             if shares > 0:
                 hard_stop_price = avg_cost * 0.92
                 
+                # 沸點逃頂
                 if temp > 95.0 and (price < yesterday_low or price < ma5):
                     sell_amount = shares * price
                     pnl = sell_amount - (shares * avg_cost)
@@ -445,7 +458,9 @@ class StrategyBacktester:
                     })
                     shares = 0
                     avg_cost = 0.0
+                    sold_today = True
                     
+                # 8% 絕對停損
                 elif price <= hard_stop_price:
                     sell_amount = shares * price
                     pnl = sell_amount - (shares * avg_cost)
@@ -457,7 +472,9 @@ class StrategyBacktester:
                     })
                     shares = 0
                     avg_cost = 0.0
+                    sold_today = True
                     
+                # 月線破位停損
                 elif price < ma20 * 0.97:
                     sell_amount = shares * price
                     pnl = sell_amount - (shares * avg_cost)
@@ -469,6 +486,18 @@ class StrategyBacktester:
                     })
                     shares = 0
                     avg_cost = 0.0
+                    sold_today = True
+
+            # 若今日已賣出，直接進入下一天，防止當天剛賣完立刻又符合進場條件買回
+            if sold_today:
+                current_portfolio_value = cash
+                benchmark_value = (self.initial_capital / df.iloc[0]['Close']) * price
+                equity_curve.append({
+                    "Date": date,
+                    "策略資產淨值": current_portfolio_value,
+                    "買入持有基準": benchmark_value
+                })
+                continue
 
             # 2. 進場建倉與加倉檢查
             if shares == 0:
@@ -511,7 +540,7 @@ class StrategyBacktester:
                         })
 
             current_portfolio_value = cash + (shares * price)
-            benchmark_value = (self.initial_capital / df.iloc[60]['Close']) * price
+            benchmark_value = (self.initial_capital / df.iloc[0]['Close']) * price
             equity_curve.append({
                 "Date": date,
                 "策略資產淨值": current_portfolio_value,
@@ -535,15 +564,15 @@ def save_db(db):
 
 def load_db():
     default_db = {
-        "stock_order": ["2330.TW", "013396"],
+        "stock_order": ["2330.TW", "561160"],
         "stocks": {
             "2330.TW": {
                 "symbol": "2330.TW", "name": "台積電",
                 "target_capital": 200000.0, "trades": [],
                 "peak_price_since_entry": 0.0, "peak_unrealized_pnl": 0.0, "last_operated_date": ""
             },
-            "013396": {
-                "symbol": "013396", "name": "華夏新能源車龍頭混合A",
+            "561160": {
+                "symbol": "561160", "name": "富國電池ETF",
                 "target_capital": 200000.0, "trades": [],
                 "peak_price_since_entry": 0.0, "peak_unrealized_pnl": 0.0, "last_operated_date": ""
             }
@@ -703,7 +732,7 @@ if active_stock and active_stock in db["stocks"]:
 st.sidebar.markdown("---")
 
 with st.sidebar.expander("➕ 新增標的", expanded=False):
-    new_sym = st.text_input("代碼 (台股 2330.TW / ETF 513380 / 基金 013396)", "").strip().upper()
+    new_sym = st.text_input("代碼 (台股 2330.TW / ETF 561160 / 基金 013396)", "").strip().upper()
     new_name = st.text_input("標的名稱 (選填，若空白將自動使用代碼)", "").strip()
     new_cap = st.number_input("為此標的設定獨立資本上限 (元)", min_value=10000.0, max_value=100000000.0, value=200000.0, step=50000.0)
     
@@ -1119,13 +1148,12 @@ with tab4:
         render_market_analysis(cn_stocks, "RMB ¥", "陸股/基金")
 
 # ==========================================
-# Tab 5: 歷史區間回測 (改為延遲加載)
+# Tab 5: 歷史區間回測 (精準時間切割與邏輯修復)
 # ==========================================
 with tab5:
     st.markdown("### 📜 個股歷史策略模擬與回測系統")
-    st.caption("請先完成下方設定，完成後點擊【🚀 開始歷史回測模擬】才會向伺服器請求數據。")
+    st.caption("請選擇回測區間並按下按鈕，系統將自動進行精準模擬。")
 
-    # 1. 優先渲染設定區域，確保UI即刻出現不卡頓
     col_bt1, col_bt2, col_bt3 = st.columns([2, 2, 2])
     with col_bt1:
         bt_symbol = st.selectbox(
@@ -1144,78 +1172,81 @@ with tab5:
     with col_cap1:
         bt_capital = st.number_input("初始回測資金", min_value=10000.0, max_value=10000000.0, value=200000.0, step=50000.0)
 
-    # 2. 只有按按鈕後才去抓數據與計算
     if st.button("🚀 開始歷史回測模擬", type="primary"):
         start_str = bt_start.strftime("%Y-%m-%d")
         end_str = bt_end.strftime("%Y-%m-%d")
 
-        with st.spinner(f"正在擷取 {bt_symbol} 自 {start_str} 至 {end_str} 的歷史行情數據..."):
+        with st.spinner(f"正在擷取 {bt_symbol} 行情數據與執行回測..."):
             try:
-                # 呼叫帶有快取的數據獲取方法
-                df_bt_raw, src_bt = cached_fetch_ohlc(bt_symbol, start_date=start_str, end_date=end_str)
+                # 為了確保技術指標（如MA60）計算準確，向前多抓60天數據
+                fetch_start = (bt_start - timedelta(days=120)).strftime("%Y-%m-%d")
+                df_bt_raw, src_bt = cached_fetch_ohlc(bt_symbol, start_date=fetch_start, end_date=end_str)
                 
-                if df_bt_raw.empty or len(df_bt_raw) < 60:
-                    st.error("歷史數據不足 60 根 K 線，無法計算完整溫控指標與執行回測。請拉長日期區間。")
+                if df_bt_raw.empty or len(df_bt_raw) < 30:
+                    st.error("歷史數據不足，無法執行回測。請確認代碼或重新選擇區間。")
                 else:
-                    backtester = StrategyBacktester(df_bt_raw, initial_capital=bt_capital)
+                    # 執行精準時間區間回測
+                    backtester = StrategyBacktester(df_bt_raw, initial_capital=bt_capital, start_date=start_str, end_date=end_str)
                     df_equity, df_trades = backtester.run()
 
-                    # 計算關鍵效能指標
-                    final_strat_val = df_equity["策略資產淨值"].iloc[-1]
-                    final_bench_val = df_equity["買入持有基準"].iloc[-1]
-                    
-                    strat_return = ((final_strat_val - bt_capital) / bt_capital) * 100.0
-                    bench_return = ((final_bench_val - bt_capital) / bt_capital) * 100.0
-
-                    # 最大回撤 (MDD)
-                    equity_series = df_equity["策略資產淨值"]
-                    cummax = equity_series.cummax()
-                    drawdown = (equity_series - cummax) / cummax
-                    max_drawdown = drawdown.min() * 100.0
-
-                    # 勝率統計
-                    if not df_trades.empty and ("全數賣出" in df_trades["動作"].values or "停損出場" in df_trades["動作"].values):
-                        closed_trades = df_trades[df_trades["動作"].isin(["全數賣出", "停損出場"])]
-                        win_count = len(closed_trades[closed_trades["損益"] > 0])
-                        total_closed = len(closed_trades)
-                        win_rate = (win_count / total_closed * 100.0) if total_closed > 0 else 0.0
+                    if df_equity.empty:
+                        st.warning("選定日期區間內沒有可用的交易日行情數據。")
                     else:
-                        win_rate = 0.0
-                        total_closed = 0
+                        final_strat_val = df_equity["策略資產淨值"].iloc[-1]
+                        final_bench_val = df_equity["買入持有基準"].iloc[-1]
+                        
+                        strat_return = ((final_strat_val - bt_capital) / bt_capital) * 100.0
+                        bench_return = ((final_bench_val - bt_capital) / bt_capital) * 100.0
 
-                    st.markdown("---")
-                    st.markdown("#### 📊 回測績效總覽")
-                    
-                    b1, b2, b3, b4, b5 = st.columns(5)
-                    b1.metric("策略期末總資產", f"${final_strat_val:,.0f}")
-                    b2.metric("策略總累積報酬率", f"{strat_return:+.2f}%", delta=f"{strat_return - bench_return:+.2f}% vs 基準")
-                    b3.metric("買入持有 (Benchmark)", f"{bench_return:+.2f}%")
-                    b4.metric("最大資產回撤 (MDD)", f"{max_drawdown:.2f}%")
-                    b5.metric("出場勝率", f"{win_rate:.1f}%", f"共 {total_closed} 次出場")
+                        # MDD 計算
+                        equity_series = df_equity["策略資產淨值"]
+                        cummax = equity_series.cummax()
+                        drawdown = (equity_series - cummax) / cummax
+                        max_drawdown = drawdown.min() * 100.0 if not drawdown.empty else 0.0
 
-                    st.markdown("---")
-                    st.markdown("#### 📈 資產淨值成長曲線 vs 買入持有對照")
+                        # 出場交易勝率
+                        if not df_trades.empty and ("全數賣出" in df_trades["動作"].values or "停損出場" in df_trades["動作"].values):
+                            closed_trades = df_trades[df_trades["動作"].isin(["全數賣出", "停損出場"])]
+                            win_count = len(closed_trades[closed_trades["損益"] > 0])
+                            total_closed = len(closed_trades)
+                            win_rate = (win_count / total_closed * 100.0) if total_closed > 0 else 0.0
+                        else:
+                            win_rate = 0.0
+                            total_closed = 0
 
-                    fig = go.Figure()
-                    fig.add_trace(go.Scatter(x=df_equity.index, y=df_equity["策略資產淨值"], mode='lines', name='動態溫控策略', line=dict(color='#2962FF', width=2)))
-                    fig.add_trace(go.Scatter(x=df_equity.index, y=df_equity["買入持有基準"], mode='lines', name='買入持有基準 (Buy & Hold)', line=dict(color='#B0BEC5', width=1.5, dash='dash')))
+                        st.markdown("---")
+                        st.markdown("#### 📊 回測績效總覽")
+                        
+                        b1, b2, b3, b4, b5 = st.columns(5)
+                        b1.metric("策略期末總資產", f"${final_strat_val:,.0f}")
+                        b2.metric("策略總累積報酬率", f"{strat_return:+.2f}%", delta=f"{strat_return - bench_return:+.2f}% vs 基準")
+                        b3.metric("買入持有 (Benchmark)", f"{bench_return:+.2f}%")
+                        b4.metric("最大資產回撤 (MDD)", f"{max_drawdown:.2f}%")
+                        b5.metric("出場勝率", f"{win_rate:.1f}%", f"共 {total_closed} 次出場")
 
-                    fig.update_layout(
-                        title=f"{bt_symbol} 策略與大盤持有權益對比圖",
-                        xaxis_title="日期",
-                        yaxis_title="資產總淨值",
-                        hovermode="x unified",
-                        template="plotly_white",
-                        height=450
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
+                        st.markdown("---")
+                        st.markdown("#### 📈 資產淨值成長曲線 vs 買入持有對照")
 
-                    st.markdown("---")
-                    st.markdown("#### 📜 模擬交易進出場明細")
-                    if not df_trades.empty:
-                        st.dataframe(df_trades, use_container_width=True, hide_index=True)
-                    else:
-                        st.info("於此歷史區間內，未觸發任何買賣進場條件。")
+                        fig = go.Figure()
+                        fig.add_trace(go.Scatter(x=df_equity.index, y=df_equity["策略資產淨值"], mode='lines', name='動態溫控策略', line=dict(color='#2962FF', width=2)))
+                        fig.add_trace(go.Scatter(x=df_equity.index, y=df_equity["買入持有基準"], mode='lines', name='買入持有基準 (Buy & Hold)', line=dict(color='#B0BEC5', width=1.5, dash='dash')))
+
+                        fig.update_layout(
+                            title=f"{bt_symbol} 策略與大盤持有權益對比圖 ({start_str} ~ {end_str})",
+                            xaxis_title="日期",
+                            yaxis_title="資產總淨值",
+                            hovermode="x unified",
+                            template="plotly_white",
+                            height=450
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+
+                        st.markdown("---")
+                        st.markdown("#### 📜 模擬交易進出場明細")
+                        if not df_trades.empty:
+                            st.dataframe(df_trades, use_container_width=True, hide_index=True)
+                        else:
+                            st.info("於此歷史區間內，未觸發任何買賣進場條件。")
 
             except Exception as ex:
                 st.error(f"執行歷史回測失敗: {ex}")
