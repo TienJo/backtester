@@ -317,11 +317,11 @@ class StrategyBacktester:
             yesterday_close = float(yesterday['Close'])
             yesterday_ma10 = float(yesterday['MA10']) if not np.isnan(yesterday['MA10']) else yesterday_close
 
-            # 修正後的 RSI 背離計算 (拉長至 20 日波段新低 + 止跌陽線確認)
+            # RSI 底背離 (20日波段新低 + 陽線止跌)
             price_low_20 = low < prev_20['Low'].min()
             min_rsi_20 = prev_20['RSI14'].min()
             rsi_bullish_div = price_low_20 and (rsi14 > min_rsi_20)
-            is_bullish_candle = price > open_p  # 收陽線止跌
+            is_bullish_candle = price > open_p
 
             if shares > 0:
                 if price > highest_price_since_entry:
@@ -334,7 +334,7 @@ class StrategyBacktester:
             if shares > 0:
                 unrealized_pct = ((price - avg_cost) / avg_cost) * 100.0
 
-                # 盈利超 15% 減碼 50%
+                # 💰 盈利超 15% 減碼 50%
                 if unrealized_pct >= 15.0 and not took_profit_15:
                     sell_shares = int(shares * 0.5)
                     if sell_shares > 0:
@@ -352,12 +352,14 @@ class StrategyBacktester:
                             "當下倉位": f"{shares:,} 股 ({pos_pct:.1f}%)", "剩餘現金": round(cash, 2)
                         })
 
-                # 沸點反轉全清倉
+                # 🔥 沸點反轉全清倉
                 if temp > 95.0 and (price < yesterday_low or price < ma5):
                     sell_amount = shares * price
                     pnl = sell_amount - (shares * avg_cost)
                     pnl_pct = (pnl / (shares * avg_cost)) * 100
                     cash += sell_amount
+                    
+                    sell_shares = shares
                     shares = 0
                     avg_cost = 0.0
                     highest_price_since_entry = 0.0
@@ -368,16 +370,18 @@ class StrategyBacktester:
 
                     trades.append({
                         "Date": date, "日期": date_str, "動作": "全數賣出", "類別": "Sell", "原因": "🔥 沸點反轉全清倉", 
-                        "成交價": price, "股數": sell_shares if 'sell_shares' in locals() else 0, "損益": round(pnl, 2), "報酬率": f"{pnl_pct:+.2f}%", 
+                        "成交價": price, "股數": sell_shares, "損益": round(pnl, 2), "報酬率": f"{pnl_pct:+.2f}%", 
                         "當下倉位": "0 股 (0.0%)", "剩餘現金": round(cash, 2)
                     })
 
-                # MA20 生命線清倉 (獲利超 15% 後生效)
+                # 🚨 跌破 MA20 生命線清倉 (獲利超 15% 後生效)
                 elif took_profit_15 and price < ma20:
                     sell_amount = shares * price
                     pnl = sell_amount - (shares * avg_cost)
                     pnl_pct = (pnl / (shares * avg_cost)) * 100
                     cash += sell_amount
+                    
+                    sell_shares = shares
                     shares = 0
                     avg_cost = 0.0
                     highest_price_since_entry = 0.0
@@ -388,12 +392,12 @@ class StrategyBacktester:
 
                     trades.append({
                         "Date": date, "日期": date_str, "動作": "清倉離場", "類別": "Sell", "原因": "🚨 跌破 MA20 清倉", 
-                        "成交價": price, "股數": shares, "損益": round(pnl, 2), "報酬率": f"{pnl_pct:+.2f}%", 
+                        "成交價": price, "股數": sell_shares, "損益": round(pnl, 2), "報酬率": f"{pnl_pct:+.2f}%", 
                         "當下倉位": "0 股 (0.0%)", "剩餘現金": round(cash, 2)
                     })
 
-                # 2.5x ATR 保險絲
-                elif not took_atr_profit and highest_price_since_entry > 0 and (highest_price_since_entry - price) >= (2.5 * atr14):
+                # 🛡️ 2.0x ATR 保險絲 (高點回落防禦)
+                elif not took_atr_profit and highest_price_since_entry > 0 and (highest_price_since_entry - price) >= (2.0 * atr14):
                     sell_shares = int(shares * 0.5)
                     if sell_shares > 0:
                         sell_amount = sell_shares * price
@@ -405,7 +409,7 @@ class StrategyBacktester:
                         curr_val = cash + (shares * price)
                         pos_pct = (shares * price / curr_val * 100) if curr_val > 0 else 0
                         trades.append({
-                            "Date": date, "日期": date_str, "動作": "減碼50%", "類別": "Sell", "原因": "🛡️ 2.5x ATR 保險絲", 
+                            "Date": date, "日期": date_str, "動作": "減碼50%", "類別": "Sell", "原因": "🛡️ 2.0x ATR 保險絲", 
                             "成交價": price, "股數": sell_shares, "損益": round(pnl, 2), "報酬率": f"{unrealized_pct:+.2f}%", 
                             "當下倉位": f"{shares:,} 股 ({pos_pct:.1f}%)", "剩餘現金": round(cash, 2)
                         })
@@ -424,7 +428,7 @@ class StrategyBacktester:
             # 2. 進場與加倉機制
             # ==========================================
             if temp <= 80.0:
-                # 第一步：極寒抄底 (需滿足 20日新低 + RSI背離 + 綜合溫度<35°C + 收陽線)
+                # 第一步：🥶 極寒抄底 (20日新低 + RSI背離 + 綜合溫度<35°C + 陽線止跌)
                 if shares == 0:
                     if rsi_bullish_div and temp < 35.0 and is_bullish_candle:
                         buy_budget = self.initial_capital * 0.15
@@ -447,9 +451,10 @@ class StrategyBacktester:
                                 "當下倉位": f"{shares:,} 股 ({pos_pct:.1f}%)", "剩餘現金": round(cash, 2)
                             })
 
-                # 既有部位加碼
+                # 第二步：既有部位加碼
                 elif shares > 0 and cash >= (price * 100):
                     price_change_from_last = (price - last_add_price) / last_add_price
+                    # 階梯式加碼 (跌10%或漲5%)
                     if price_change_from_last <= -0.10 or price_change_from_last >= 0.05:
                         add_budget = self.initial_capital * 0.10
                         add_shares = int(min(add_budget, cash) / price)
@@ -468,10 +473,17 @@ class StrategyBacktester:
                                 "當下倉位": f"{shares:,} 股 ({pos_pct:.1f}%)", "剩餘現金": round(cash, 2)
                             })
 
+                    # 🚀 黃金突破打滿條件防禦：
+                    # 1. 站上 MA10
+                    # 2. MA10 走平或向上 (ma10 >= yesterday_ma10)
+                    # 3. 站上 MA20 生命線 (price >= ma20)
+                    # 4. 未破 10 日新低且 35°C <= T <= 80°C
                     breakout_ma10 = (price > ma10) and (yesterday_close <= yesterday_ma10)
+                    ma10_turning_up = ma10 >= yesterday_ma10
+                    above_life_line = price >= ma20
                     not_new_low = low >= prev_10['Low'].min()
                     
-                    if breakout_ma10 and not_new_low and (35.0 <= temp <= 80.0):
+                    if breakout_ma10 and ma10_turning_up and above_life_line and not_new_low and (35.0 <= temp <= 80.0):
                         add_shares = int(cash / price)
                         if add_shares > 0:
                             total_cost = (shares * avg_cost) + (add_shares * price)
@@ -483,7 +495,7 @@ class StrategyBacktester:
                             curr_val = cash + (shares * price)
                             pos_pct = (shares * price / curr_val * 100) if curr_val > 0 else 0
                             trades.append({
-                                "Date": date, "日期": date_str, "動作": "黃金突破打滿", "類別": "Buy", "原因": "🚀 黃金突破打滿", 
+                                "Date": date, "日期": date_str, "動作": "黃金突破打滿", "類別": "Buy", "原因": "🚀 黃金突破打滿 (MA10向上+站上MA20)", 
                                 "成交價": price, "股數": add_shares, "損益": 0.0, "報酬率": "0.00%", 
                                 "當下倉位": f"{shares:,} 股 ({pos_pct:.1f}%)", "剩餘現金": round(cash, 2)
                             })
@@ -779,11 +791,10 @@ if st.button("🚀 開始歷史回測模擬", type="primary"):
                     )
                     st.plotly_chart(fig_eq, use_container_width=True)
 
-                    # 模擬交易進出場明細 (含「當下倉位」欄位)
+                    # 模擬交易進出場明細
                     st.markdown("---")
                     st.markdown("#### 📜 模擬交易進出場明細")
                     if not df_trades.empty:
-                        # 整理顯示欄位順序
                         cols_order = ["日期", "動作", "原因", "成交價", "股數", "損益", "報酬率", "當下倉位", "剩餘現金"]
                         display_df = df_trades[cols_order]
                         st.dataframe(display_df, use_container_width=True, hide_index=True)
