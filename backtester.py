@@ -271,7 +271,7 @@ class TradingStrategyEngine:
         return df
 
 # ==========================================
-# 3. 歷史回測引擎 (含「破MA60鎖定 + 二次探底」機制)
+# 3. 歷史回測引擎 (RSI 背離 > 20點強效過濾版)
 # ==========================================
 class StrategyBacktester:
     def __init__(self, df: pd.DataFrame, initial_capital: float = 200000.0, start_date: str = None, end_date: str = None):
@@ -289,24 +289,23 @@ class StrategyBacktester:
         shares = 0
         avg_cost = 0.0
         took_profit = False
-        
-        # --- 核心新增狀態標記 ---
-        waiting_for_second_bottom = False  # 是否處於「破MA60後等待二次探底」狀態
+        waiting_for_second_bottom = False
         
         trades = []
         equity_curve = []
         
         for i in range(len(df)):
-            if i < 10:
+            if i < 15:
                 continue
                 
             date = df.index[i]
             date_str = date.strftime("%Y-%m-%d")
             today = df.iloc[i]
             yesterday = df.iloc[i-1]
-            prev_10 = df.iloc[i-10:i]
+            prev_15 = df.iloc[i-15:i]
             
             price = float(today['Close'])
+            open_p = float(today['Open'])
             high = float(today['High'])
             low = float(today['Low'])
             volume = float(today['Volume'])
@@ -324,12 +323,20 @@ class StrategyBacktester:
             breakout_20_high = (price > high_20) and (vol_ratio >= 1.2)
             bullish_trend = price > ma20 and ma5 > ma20
 
-            # RSI 底背離計算
-            price_low_10 = low < prev_10['Low'].min()
-            rsi_not_low_10 = rsi14 > prev_10['RSI14'].min()
-            rsi_bullish_div = price_low_10 and rsi_not_low_10 and (rsi14 < 45)
+            # --------------------------------------------------------
+            # 精準 RSI 背離過濾機制
+            # --------------------------------------------------------
+            min_rsi_15 = prev_15['RSI14'].min()
+            price_low_15 = low < prev_15['Low'].min()
             
-            # **二次探底關鍵條件：RSI 底背離 + 當日低點在 MA5 上方**
+            # 【關鍵修訂】：當前 RSI 必須比前 15 日最低點「大於 20 個點以上」
+            rsi_diff_over_20 = (rsi14 - min_rsi_15) >= 20.0
+            is_bullish_candle = price >= open_p  # 必須開低走高或收陽線
+
+            # 基礎底背離條件 (創低 + 強力背離>20點 + 收陽)
+            rsi_bullish_div = price_low_15 and rsi_diff_over_20 and is_bullish_candle
+            
+            # **二次探底核心條件**：強背離 + 當日低點在 MA5 上方
             second_bottom_signal = rsi_bullish_div and (low >= ma5)
 
             # 1. 出場與減倉機制
@@ -338,7 +345,7 @@ class StrategyBacktester:
                 hard_stop_price = avg_cost * 0.92
                 unrealized_pct = ((price - avg_cost) / avg_cost) * 100.0
 
-                # A. 獲利 15% 減倉 50%
+                # 獲利 15% 減倉 50%
                 if unrealized_pct >= 15.0 and not took_profit:
                     sell_shares = int(shares * 0.5)
                     if sell_shares > 0:
@@ -352,7 +359,7 @@ class StrategyBacktester:
                             "成交價": price, "股數": sell_shares, "損益": pnl, "報酬率": f"{unrealized_pct:+.2f}%", "剩餘現金": cash
                         })
 
-                # B. 沸點逃頂 (全賣)
+                # 沸點逃頂
                 if temp > 95.0 and (price < yesterday_low or price < ma5):
                     sell_amount = shares * price
                     pnl = sell_amount - (shares * avg_cost)
@@ -362,17 +369,14 @@ class StrategyBacktester:
                         "日期": date_str, "動作": "全數賣出", "原因": "🔥 沸點反轉逃頂", 
                         "成交價": price, "股數": shares, "損益": pnl, "報酬率": f"{pnl_pct:+.2f}%", "剩餘現金": cash
                     })
-                    
-                    # 若賣出時價格已在 MA60 下方，進入等待二次探底狀態
                     if price < ma60:
                         waiting_for_second_bottom = True
-                        
                     shares = 0
                     avg_cost = 0.0
                     took_profit = False
                     sold_today = True
                     
-                # C. 8% 絕對停損 (全賣)
+                # 8% 絕對停損
                 elif price <= hard_stop_price:
                     sell_amount = shares * price
                     pnl = sell_amount - (shares * avg_cost)
@@ -382,17 +386,14 @@ class StrategyBacktester:
                         "日期": date_str, "動作": "停損出場", "原因": "🚨 跌破成本 8%", 
                         "成交價": price, "股數": shares, "損益": pnl, "報酬率": f"{pnl_pct:+.2f}%", "剩餘現金": cash
                     })
-                    
-                    # 停損離場，若低於 MA60，啟動等待二次探底鎖定
                     if price < ma60:
                         waiting_for_second_bottom = True
-                        
                     shares = 0
                     avg_cost = 0.0
                     took_profit = False
                     sold_today = True
                     
-                # D. 建倉失敗停損 (跌破 MA20 * 0.97)
+                # 建倉失敗停損 (MA20 * 0.97)
                 elif price < ma20 * 0.97:
                     sell_amount = shares * price
                     pnl = sell_amount - (shares * avg_cost)
@@ -402,11 +403,8 @@ class StrategyBacktester:
                         "日期": date_str, "動作": "停損出場", "原因": "⚠️ 跌破 MA20 3%", 
                         "成交價": price, "股數": shares, "損益": pnl, "報酬率": f"{pnl_pct:+.2f}%", "剩餘現金": cash
                     })
-                    
-                    # 停損離場，若低於 MA60，啟動等待二次探底鎖定
                     if price < ma60:
                         waiting_for_second_bottom = True
-                        
                     shares = 0
                     avg_cost = 0.0
                     took_profit = False
@@ -424,9 +422,7 @@ class StrategyBacktester:
 
             # 2. 建倉與加倉機制
             if shares == 0:
-                # ----------------------------------------------------
-                # 情境 A：處於「高位破 MA60 停損」後的鎖定狀態，必須等待二次探底解鎖
-                # ----------------------------------------------------
+                # 狀況 A：跌破 MA60 鎖定中，必須等待「RSI背離>20點 + 低點>MA5」解鎖建倉
                 if waiting_for_second_bottom:
                     if second_bottom_signal:
                         buy_budget = self.initial_capital * 0.4
@@ -437,18 +433,13 @@ class StrategyBacktester:
                             shares = buy_shares
                             avg_cost = price
                             took_profit = False
-                            waiting_for_second_bottom = False  # 完美完成二次探底建倉，解除鎖定！
+                            waiting_for_second_bottom = False  # 解鎖
                             trades.append({
-                                "日期": date_str, "動作": "建倉(40%)", "原因": "🎯 二次探底成功 (RSI背離+低點>MA5)", 
+                                "日期": date_str, "動作": "建倉(40%)", "原因": "🎯 二次探底成功 (RSI背離>20點+低點>MA5)", 
                                 "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%", "剩餘現金": cash
                             })
-                    else:
-                        # 尚未滿足二次探底條件，一律不建倉觀望
-                        pass
 
-                # ----------------------------------------------------
-                # 情境 B：正常狀態 (未破 MA60 或非停損狀態)
-                # ----------------------------------------------------
+                # 狀況 B：正常狀態
                 else:
                     if rsi_bullish_div and temp < 35.0:
                         buy_budget = self.initial_capital * 0.4
@@ -460,7 +451,7 @@ class StrategyBacktester:
                             avg_cost = price
                             took_profit = False
                             trades.append({
-                                "日期": date_str, "動作": "建倉(40%)", "原因": "🎯 極寒抄底", 
+                                "日期": date_str, "動作": "建倉(40%)", "原因": "🎯 極寒抄底 (RSI背離>20點)", 
                                 "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%", "剩餘現金": cash
                             })
                     elif breakout_20_high and 35.0 <= temp <= 80.0:
@@ -477,7 +468,6 @@ class StrategyBacktester:
                                 "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%", "剩餘現金": cash
                             })
 
-            # 已有部位且尚有現金，觸發二次加碼打滿
             elif shares > 0 and cash >= (self.initial_capital * 0.1):
                 if (breakout_20_high or bullish_trend) and 35.0 <= temp <= 85.0:
                     add_shares = int(cash / price)
@@ -564,7 +554,7 @@ def load_db():
 
 
 # ==========================================
-# 5. Streamlit GUI 主介面 (僅保留控制台與回測)
+# 5. Streamlit GUI 主介面
 # ==========================================
 st.set_page_config(page_title="動態溫控策略回測系統", layout="wide", page_icon="📜")
 st.markdown("""
@@ -582,7 +572,6 @@ db = st.session_state.db
 db.setdefault("stocks", {})
 db.setdefault("stock_order", list(db["stocks"].keys()))
 
-# ----------------- 側邊欄控制面板 -----------------
 st.sidebar.title("⚙️ 戰情控制面板")
 
 stock_keys = [k for k in db.get("stock_order", []) if k in db["stocks"]]
@@ -649,9 +638,9 @@ if db.get("stocks"):
         st.sidebar.success(f"已刪除 {del_sym}")
         st.rerun()
 
-# ----------------- 主介面：歷史區間回測 -----------------
+# 主介面：歷史區間回測
 st.title("📜 個股歷史策略模擬與回測系統")
-st.caption("已加入【高位破 MA60 鎖定建倉 + 二次探底 (RSI背離 + 當日低點>MA5)】保護機制。")
+st.caption("已升級：二次探底要求【RSI底背離差距 > 20個點】且【當日低點在 MA5 上方】。")
 
 col_bt1, col_bt2, col_bt3 = st.columns([2, 2, 2])
 with col_bt1:
