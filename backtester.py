@@ -265,7 +265,7 @@ class TradingStrategyEngine:
         return df
 
 # ==========================================
-# 3. 歷史回測引擎 (新策略 logic)
+# 3. 歷史回測引擎
 # ==========================================
 class StrategyBacktester:
     def __init__(self, df: pd.DataFrame, initial_capital: float = 200000.0, start_date: str = None, end_date: str = None):
@@ -332,7 +332,7 @@ class StrategyBacktester:
             if shares > 0:
                 unrealized_pct = ((price - avg_cost) / avg_cost) * 100.0
 
-                # A. 盈利超過 15% 減倉 50%
+                # A. 盈利超過 15% 減倉 50% (觸發後開啟 MA20 移動清倉機制)
                 if unrealized_pct >= 15.0 and not took_profit_15:
                     sell_shares = int(shares * 0.5)
                     if sell_shares > 0:
@@ -342,7 +342,7 @@ class StrategyBacktester:
                         shares -= sell_shares
                         took_profit_15 = True
                         trades.append({
-                            "日期": date_str, "動作": "減碼50%", "原因": "💰 盈利超15%鎖利", 
+                            "日期": date_str, "動作": "減碼50%", "原因": "💰 盈利超15%鎖利 (啟動MA20防守)", 
                             "成交價": price, "股數": sell_shares, "損益": pnl, "報酬率": f"{unrealized_pct:+.2f}%", "剩餘現金": cash
                         })
 
@@ -364,14 +364,14 @@ class StrategyBacktester:
                     took_atr_profit = False
                     sold_today = True
 
-                # C. 無條件生命線止損 (跌破 MA20)
-                elif price < ma20:
+                # C. MA20 生命線清倉：僅在「收益已達15%之後」才生效！
+                elif took_profit_15 and price < ma20:
                     sell_amount = shares * price
                     pnl = sell_amount - (shares * avg_cost)
                     pnl_pct = (pnl / (shares * avg_cost)) * 100
                     cash += sell_amount
                     trades.append({
-                        "日期": date_str, "動作": "清倉離場", "原因": "🚨 跌破 MA20 生命線", 
+                        "日期": date_str, "動作": "清倉離場", "原因": "🚨 獲利後跌破 MA20 生命線清倉", 
                         "成交價": price, "股數": shares, "損益": pnl, "報酬率": f"{pnl_pct:+.2f}%", "剩餘現金": cash
                     })
                     shares = 0
@@ -624,7 +624,7 @@ if db.get("stocks"):
 
 # ----------------- 主介面：歷史區間回測 -----------------
 st.title("📜 個股歷史策略模擬與回測系統")
-st.caption("目前採用【低頻精準打擊 + MA20生命線止損 + 2.5x ATR動態保險絲 + 95°C沸點全清倉】策略機制。")
+st.caption("防守機制已更新：跌破 MA20 清倉僅在【獲利超15%減碼後】才會啟動。")
 
 col_bt1, col_bt2, col_bt3 = st.columns([2, 2, 2])
 with col_bt1:
