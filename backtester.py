@@ -36,7 +36,7 @@ class MultiSourceMarketData:
 
         try:
             df = self._fetch_eastmoney(symbol, clean_code, start_date, end_date)
-            if not df.empty and len(df) >= 30:
+            if not df.empty and len(df) >= 10:
                 return df, "東方財富 (EastMoney)"
         except Exception:
             pass
@@ -44,21 +44,21 @@ class MultiSourceMarketData:
         if clean_code.isdigit() and len(clean_code) == 6:
             try:
                 df = self._fetch_eastmoney_fund(clean_code)
-                if not df.empty and len(df) >= 30:
+                if not df.empty and len(df) >= 10:
                     return df, "天天基金 (Tiantian Fund)"
             except Exception:
                 pass
 
         try:
             df = self._fetch_tencent(symbol, clean_code)
-            if not df.empty and len(df) >= 30:
+            if not df.empty and len(df) >= 10:
                 return df, "騰訊財經 (Tencent)"
         except Exception:
             pass
 
         try:
             df = self._fetch_yfinance(symbol, start_date, end_date)
-            if not df.empty and len(df) >= 30:
+            if not df.empty and len(df) >= 10:
                 return df, "yfinance (備用)"
         except Exception:
             pass
@@ -184,7 +184,7 @@ class MultiSourceMarketData:
                 else:
                     df = ticker.history(period="2y")
                 
-                if not df.empty and len(df) >= 30:
+                if not df.empty and len(df) >= 10:
                     df = df.reset_index()
                     df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None)
                     df.set_index('Date', inplace=True)
@@ -202,302 +202,68 @@ def cached_fetch_ohlc(symbol: str, start_date: str = None, end_date: str = None)
     return data_engine.fetch_ohlc(symbol, start_date, end_date)
 
 # ==========================================
-# 2. 技術指標與動態溫控邏輯
+# 2. 技術指標與量價分析計算引擎
 # ==========================================
-class TradingStrategyEngine:
+class TechnicalAnalysisEngine:
     @staticmethod
     def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
+        
+        # 均線計算
         df['MA5'] = df['Close'].rolling(5).mean()
         df['MA10'] = df['Close'].rolling(10).mean()
         df['MA20'] = df['Close'].rolling(20).mean()
         df['MA60'] = df['Close'].rolling(60).mean()
+
+        # 量能指標與量比計算
         df['Vol_MA5'] = df['Volume'].rolling(5).mean()
+        df['Vol_MA10'] = df['Volume'].rolling(10).mean()
+        df['Vol_MA20'] = df['Volume'].rolling(20).mean()
 
-        df['TR0'] = df['High'] - df['Low']
-        df['TR1'] = (df['High'] - df['Close'].shift(1)).abs()
-        df['TR2'] = (df['Low'] - df['Close'].shift(1)).abs()
-        df['TR'] = df[['TR0', 'TR1', 'TR2']].max(axis=1)
-        df['ATR14'] = df['TR'].ewm(alpha=1/14, adjust=False).mean()
+        # 當日量比（相對於前5日均量）、五日量比（5日均量對比前5日均量）、十日量比（10日均量對比前10日均量）
+        df['Daily_Vol_Ratio'] = df['Volume'] / df['Vol_MA5'].shift(1)
+        df['Vol_Ratio_5D'] = df['Vol_MA5'] / df['Vol_MA5'].shift(5)
+        df['Vol_Ratio_10D'] = df['Vol_MA10'] / df['Vol_MA10'].shift(10)
 
+        # RSI 計算
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
         rs = gain / loss
         df['RSI14'] = 100 - (100 / (1 + rs))
 
-        df['High_20'] = df['High'].shift(1).rolling(20).max()
-        df['Low_20'] = df['Low'].shift(1).rolling(20).min()
+        # 5日與20日看多/看空結構分析
+        # 5日看多：收盤 > MA5 且 MA5 向上；5日看空：收盤 < MA5 且 MA5 向下
+        ma5_diff = df['MA5'].diff()
+        df['Bull_5D'] = (df['Close'] > df['MA5']) & (ma5_diff > 0)
+        df['Bear_5D'] = (df['Close'] < df['MA5']) & (ma5_diff < 0)
 
-        ema12 = df['Close'].ewm(span=12, adjust=False).mean()
-        ema26 = df['Close'].ewm(span=26, adjust=False).mean()
-        df['DIF'] = ema12 - ema26
-        df['DEA'] = df['DIF'].ewm(span=9, adjust=False).mean()
-        df['MACD_Hist'] = (df['DIF'] - df['DEA']) * 2
+        # 20日看多：收盤 > MA20 且 MA20 向上且 MA5 > MA20；20日看空：收盤 < MA20 且 MA20 向下且 MA5 < MA20
+        ma20_diff = df['MA20'].diff()
+        df['Bull_20D'] = (df['Close'] > df['MA20']) & (ma20_diff > 0) & (df['MA5'] > df['MA20'])
+        df['Bear_20D'] = (df['Close'] < df['MA20']) & (ma20_diff < 0) & (df['MA5'] < df['MA20'])
 
-        df['Ret20'] = df['Close'].pct_change(20)
-        df['Score_Rank20'] = df['Ret20'].rolling(60).apply(
-            lambda x: (pd.Series(x).rank(pct=True).iloc[-1] * 100) if len(x) > 0 else 50, raw=False
-        )
+        # 均線金叉與趨勢反轉結構分析
+        # 短線金叉：當日或近期 MA5 向上穿過 MA10 / MA20
+        df['GC_MA5_MA10'] = (df['MA5'] > df['MA10']) & (df['MA5'].shift(1) <= df['MA10'].shift(1))
+        df['GC_MA5_MA20'] = (df['MA5'] > df['MA20']) & (df['MA5'].shift(1) <= df['MA20'].shift(1))
+        df['GC_MA10_MA20'] = (df['MA10'] > df['MA20']) & (df['MA10'].shift(1) <= df['MA20'].shift(1))
 
-        range_20 = df['High_20'] - df['Low_20']
-        df['Score_Pos20'] = np.where(range_20 > 0, (df['Close'] - df['Low_20']) / range_20 * 100.0, 50.0)
+        # 5日內量價背離判定（頂背離：價格創新高但成交量/RSI縮減；底背離：價格創新低但成交量/RSI不創新低）
+        price_5d_max = df['Close'].rolling(5).max()
+        price_5d_min = df['Close'].rolling(5).min()
+        vol_5d_max = df['Volume'].rolling(5).max()
+        rsi_5d_min = df['RSI14'].rolling(5).min()
 
-        ma_score = np.zeros(len(df))
-        ma_score += np.where(df['Close'] > df['MA5'], 25, 0)
-        ma_score += np.where(df['MA5'] > df['MA10'], 25, 0)
-        ma_score += np.where(df['MA10'] > df['MA20'], 25, 0)
-        ma_score += np.where(df['MA20'] > df['MA60'], 25, 0)
-        df['Score_MA'] = ma_score
-
-        df['Score_RSI'] = df['RSI14'].clip(0, 100)
-
-        df['Score_MACD'] = df['MACD_Hist'].rolling(60).apply(
-            lambda x: (pd.Series(x).rank(pct=True).iloc[-1] * 100) if len(x) > 0 else 50, raw=False
-        )
-
-        df['Temperature'] = (
-            0.24 * df['Score_Rank20'].fillna(50) +
-            0.22 * df['Score_Pos20'].fillna(50) +
-            0.22 * df['Score_MA'] +
-            0.18 * df['Score_RSI'].fillna(50) +
-            0.14 * df['Score_MACD'].fillna(50)
-        ).clip(0, 100)
+        # 頂背離：當前價格創5日新高但成交量明顯低於近5日最大量
+        df['Bear_Divergence_5D'] = (df['Close'] == price_5d_max) & (df['Volume'] < vol_5d_max * 0.8) & (df['Close'] > df['Close'].shift(1))
+        # 底背離：當前價格創5日新低但RSI未創新低且量能放大
+        df['Bull_Divergence_5D'] = (df['Close'] == price_5d_min) & (df['RSI14'] > rsi_5d_min) & (df['Volume'] > df['Vol_MA5'])
 
         return df
 
 # ==========================================
-# 3. 歷史回測引擎 (左右碼混合與分層加碼)
-# ==========================================
-class StrategyBacktester:
-    def __init__(self, df: pd.DataFrame, initial_capital: float = 200000.0, start_date: str = None, end_date: str = None):
-        df_calc = TradingStrategyEngine.calculate_indicators(df)
-        if start_date and end_date:
-            self.df = df_calc.loc[start_date:end_date]
-        else:
-            self.df = df_calc
-            
-        self.initial_capital = initial_capital
-
-    def run(self):
-        df = self.df.copy()
-        cash = self.initial_capital
-        shares = 0
-        avg_cost = 0.0
-        layers_held = 0
-        
-        trades = []
-        equity_curve = []
-        
-        for i in range(len(df)):
-            if i < 20:
-                continue
-                
-            date = df.index[i]
-            date_str = date.strftime("%Y-%m-%d")
-            today = df.iloc[i]
-            yesterday = df.iloc[i-1]
-            prev_10 = df.iloc[i-10:i]
-            
-            price = float(today['Close'])
-            open_p = float(today['Open'])
-            low = float(today['Low'])
-            
-            ma5 = float(today['MA5']) if not np.isnan(today['MA5']) else price
-            ma10 = float(today['MA10']) if not np.isnan(today['MA10']) else price
-            ma20 = float(today['MA20']) if not np.isnan(today['MA20']) else price
-            ma60 = float(today['MA60']) if not np.isnan(today['MA60']) else price
-            temp = float(today['Temperature']) if not np.isnan(today['Temperature']) else 50.0
-            
-            yesterday_close = float(yesterday['Close'])
-            yesterday_ma5 = float(yesterday['MA5']) if not np.isnan(yesterday['MA5']) else yesterday_close
-            yesterday_ma20 = float(yesterday['MA20']) if not np.isnan(yesterday['MA20']) else ma20
-            
-            vol_ma5 = float(today['Vol_MA5']) if not np.isnan(today['Vol_MA5']) else float(today['Volume'])
-            prev_vol_ma5 = float(yesterday['Vol_MA5']) if not np.isnan(yesterday['Vol_MA5']) else float(yesterday['Volume'])
-
-            # ==========================================
-            # 1. 出場機制
-            # ==========================================
-            sold_today = False
-            if layers_held > 0:
-                unrealized_pct = ((price - avg_cost) / avg_cost) * 100.0 if avg_cost > 0 else 0.0
-                
-                is_high_temp = temp > 80.0
-                is_down_day = price < open_p
-                broken_ma5 = price < ma5
-                vol_shrinking = vol_ma5 < prev_vol_ma5
-                ma5_rising = ma5 > yesterday_ma5
-
-                # 離場訊號：高溫區域 + 當日跌破 MA5 + 5日量比線(縮量)與 MA5(上漲)背離
-                if is_high_temp and is_down_day and broken_ma5 and vol_shrinking and ma5_rising:
-                    sell_amount = shares * price
-                    pnl = sell_amount - (shares * avg_cost)
-                    cash += sell_amount
-                    
-                    sell_shares = shares
-                    shares = 0
-                    layers_held = 0
-                    avg_cost = 0.0
-                    sold_today = True
-
-                    trades.append({
-                        "Date": date, "日期": date_str, "動作": "清倉離場", "類別": "Sell", "原因": "🔥 高溫+破MA5+量縮價漲背離", 
-                        "成交價": price, "股數": sell_shares, "損益": round(pnl, 2), "報酬率": f"{unrealized_pct:+.2f}%", 
-                        "當下倉位": "0 股 (0.0%)", "剩餘現金": round(cash, 2)
-                    })
-
-                # 8% 風險硬停損
-                elif unrealized_pct <= -8.0:
-                    sell_amount = shares * price
-                    pnl = sell_amount - (shares * avg_cost)
-                    cash += sell_amount
-                    
-                    sell_shares = shares
-                    shares = 0
-                    layers_held = 0
-                    avg_cost = 0.0
-                    sold_today = True
-
-                    trades.append({
-                        "Date": date, "日期": date_str, "動作": "全數賣出", "類別": "Sell", "原因": "🛑 8% 硬停損止血", 
-                        "成交價": price, "股數": sell_shares, "損益": round(pnl, 2), "報酬率": f"{unrealized_pct:+.2f}%", 
-                        "當下倉位": "0 股 (0.0%)", "剩餘現金": round(cash, 2)
-                    })
-
-            if sold_today:
-                current_portfolio_value = cash
-                benchmark_value = (self.initial_capital / df.iloc[0]['Close']) * price
-                equity_curve.append({
-                    "Date": date,
-                    "策略資產淨值": current_portfolio_value,
-                    "買入持有基準": benchmark_value
-                })
-                continue
-
-            # ==========================================
-            # 2. 進場與加倉機制
-            # ==========================================
-            if layers_held == 0:
-                # 左側進場判斷
-                vol_recent_2 = prev_10['Volume'].iloc[-2:] if len(prev_10) >= 2 else pd.Series([float('inf')])
-                vol_older_5 = prev_10['Volume'].iloc[-7:-2] if len(prev_10) >= 7 else pd.Series([0])
-                vol_new_low = vol_recent_2.min() < vol_older_5.min() if len(vol_older_5) > 0 else False
-                
-                rsi_recent_2 = prev_10['RSI14'].iloc[-2:] if len(prev_10) >= 2 else pd.Series([100])
-                rsi_older_3 = prev_10['RSI14'].iloc[-5:-2] if len(prev_10) >= 5 else pd.Series([0])
-                rsi_bottom = rsi_recent_2.min() <= rsi_older_3.min() if len(rsi_older_3) > 0 else False
-                
-                left_cond = vol_new_low and rsi_bottom and (price > ma5) and (ma20 > ma10) and (ma20 > ma5) and (temp < 35.0)
-                
-                # 右側進場判斷
-                high_vol = today['Volume'] > vol_ma5 * 1.5
-                breakout_ma20 = (price > ma20) and (yesterday_close <= yesterday_ma20)
-                ma_healthy = (ma5 > ma10) and (ma10 > ma20) and (ma20 > ma60)
-                right_cond = high_vol and breakout_ma20 and ma_healthy and (35.0 <= temp <= 80.0)
-
-                if left_cond:
-                    budget = self.initial_capital * 0.20
-                    buy_shares = int(budget / price)
-                    if buy_shares > 0 and cash >= buy_shares * price:
-                        cost = buy_shares * price
-                        cash -= cost
-                        shares += buy_shares
-                        avg_cost = price
-                        layers_held = 2
-
-                        curr_val = cash + (shares * price)
-                        pos_pct = (shares * price / curr_val * 100) if curr_val > 0 else 0
-                        trades.append({
-                            "Date": date, "日期": date_str, "動作": "建倉兩層(20%)", "類別": "Buy", "原因": "🥶 左側縮量抄底 (底溫+破5日新低)", 
-                            "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%", 
-                            "當下倉位": f"{shares:,} 股 ({pos_pct:.1f}%)", "剩餘現金": round(cash, 2)
-                        })
-
-                elif right_cond:
-                    budget = self.initial_capital * 0.40
-                    buy_shares = int(budget / price)
-                    if buy_shares > 0 and cash >= buy_shares * price:
-                        cost = buy_shares * price
-                        cash -= cost
-                        shares += buy_shares
-                        avg_cost = price
-                        layers_held = 4
-
-                        curr_val = cash + (shares * price)
-                        pos_pct = (shares * price / curr_val * 100) if curr_val > 0 else 0
-                        trades.append({
-                            "Date": date, "日期": date_str, "動作": "建倉四層(40%)", "類別": "Buy", "原因": "🚀 右側突破建倉 (放量突破+均線多頭)", 
-                            "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%", 
-                            "當下倉位": f"{shares:,} 股 ({pos_pct:.1f}%)", "剩餘現金": round(cash, 2)
-                        })
-
-            elif layers_held > 0:
-                # 中段：站上 MA20 馬上補到 8 層
-                if layers_held < 8 and price > ma20:
-                    layers_to_add = 8 - layers_held
-                    budget = self.initial_capital * (layers_to_add * 0.10)
-                    buy_shares = int(budget / price)
-                    if buy_shares > 0 and cash >= buy_shares * price:
-                        total_cost = (shares * avg_cost) + (buy_shares * price)
-                        cash -= (buy_shares * price)
-                        shares += buy_shares
-                        avg_cost = total_cost / shares
-                        layers_held = 8
-
-                        curr_val = cash + (shares * price)
-                        pos_pct = (shares * price / curr_val * 100) if curr_val > 0 else 0
-                        trades.append({
-                            "Date": date, "日期": date_str, "動作": "加碼至八層(80%)", "類別": "Buy", "原因": "📈 站上 MA20 快速加碼", 
-                            "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%", 
-                            "當下倉位": f"{shares:,} 股 ({pos_pct:.1f}%)", "剩餘現金": round(cash, 2)
-                        })
-
-                # 中段：回測 MA10 加碼剩餘兩層
-                elif layers_held >= 8 and layers_held < 10:
-                    pullback_ma10 = (low <= ma10)
-                    vol_last_3 = prev_10['Volume'].iloc[-3:] if len(prev_10) >= 3 else []
-                    vol_ma5_last_3 = prev_10['Vol_MA5'].iloc[-3:] if len(prev_10) >= 3 else []
-                    
-                    no_shrink = True
-                    for v, v_ma in zip(vol_last_3, vol_ma5_last_3):
-                        if v < v_ma * 0.8:
-                            no_shrink = False
-                            break
-                            
-                    if pullback_ma10 and no_shrink:
-                        budget = self.initial_capital * 0.10
-                        buy_shares = int(budget / price)
-                        if buy_shares > 0 and cash >= buy_shares * price:
-                            total_cost = (shares * avg_cost) + (buy_shares * price)
-                            cash -= (buy_shares * price)
-                            shares += buy_shares
-                            avg_cost = total_cost / shares
-                            layers_held += 1
-
-                            curr_val = cash + (shares * price)
-                            pos_pct = (shares * price / curr_val * 100) if curr_val > 0 else 0
-                            trades.append({
-                                "Date": date, "日期": date_str, "動作": f"加碼一層(10%)", "類別": "Buy", "原因": "💧 回測 MA10 且前3日無縮量", 
-                                "成交價": price, "股數": buy_shares, "損益": 0.0, "報酬率": "0.00%", 
-                                "當下倉位": f"{shares:,} 股 ({pos_pct:.1f}%)", "剩餘現金": round(cash, 2)
-                            })
-
-            current_portfolio_value = cash + (shares * price)
-            benchmark_value = (self.initial_capital / df.iloc[0]['Close']) * price
-            equity_curve.append({
-                "Date": date,
-                "策略資產淨值": current_portfolio_value,
-                "買入持有基準": benchmark_value
-            })
-
-        df_equity = pd.DataFrame(equity_curve).set_index("Date")
-        df_trades = pd.DataFrame(trades)
-        
-        return df_equity, df_trades, df
-
-# ==========================================
-# 4. 本地 JSON 數據庫管理者
+# 3. 本地 JSON 數據庫管理者
 # ==========================================
 DB_FILE = "portfolio_data.json"
 
@@ -510,15 +276,13 @@ def load_db():
         "stock_order": ["2330.TW", "513380"],
         "stocks": {
             "2330.TW": {
-                "symbol": "2330.TW", "name": "台積電",
-                "target_capital": 200000.0
+                "symbol": "2330.TW", "name": "台積電"
             },
             "513380": {
-                "symbol": "513380", "name": "恒生科技ETF廣發",
-                "target_capital": 200000.0
+                "symbol": "513380", "name": "恒生科技ETF廣發"
             }
         },
-        "bt_start": (datetime.now() - timedelta(days=730)).strftime("%Y-%m-%d"),
+        "bt_start": (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d"),
         "bt_end": datetime.now().strftime("%Y-%m-%d")
     }
 
@@ -548,8 +312,7 @@ def load_db():
                     if isinstance(val, dict):
                         new_data["stocks"][key] = {
                             "symbol": val.get("symbol", key),
-                            "name": val.get("name", key),
-                            "target_capital": 200000.0
+                            "name": val.get("name", key)
                         }
                         new_data["stock_order"].append(key)
                 save_db(new_data)
@@ -562,9 +325,9 @@ def load_db():
         return default_db
 
 # ==========================================
-# 5. Streamlit GUI 主介面
+# 4. Streamlit GUI 主介面
 # ==========================================
-st.set_page_config(page_title="動態溫控策略回測系統", layout="wide", page_icon="📜")
+st.set_page_config(page_title="專業K線與量價結構分析工具", layout="wide", page_icon="📈")
 
 if "db" not in st.session_state:
     st.session_state.db = load_db()
@@ -573,7 +336,7 @@ db = st.session_state.db
 db.setdefault("stocks", {})
 db.setdefault("stock_order", list(db["stocks"].keys()))
 
-st.sidebar.title("⚙️ 戰情控制面板")
+st.sidebar.title("⚙️ 標的與控制面板")
 
 stock_keys = [k for k in db.get("stock_order", []) if k in db["stocks"]]
 stock_options = {k: f"{k} - {db['stocks'][k].get('name', k)}" for k in stock_keys}
@@ -603,14 +366,13 @@ st.sidebar.markdown("---")
 with st.sidebar.expander("➕ 新增標的", expanded=False):
     new_sym = st.text_input("代碼 (台股 2330.TW / ETF 513380 / 基金 013396)", "").strip().upper()
     new_name = st.text_input("標的名稱 (選填，若空白將自動使用代碼)", "").strip()
-    new_cap = st.number_input("獨立資本上限 (元)", min_value=10000.0, max_value=100000000.0, value=200000.0, step=50000.0)
     
     if st.button("確認新增"):
         if new_sym:
             final_name = new_name if new_name else new_sym
             if new_sym not in db["stocks"]:
                 db["stocks"][new_sym] = {
-                    "symbol": new_sym, "name": final_name, "target_capital": new_cap
+                    "symbol": new_sym, "name": final_name
                 }
                 if new_sym not in db["stock_order"]:
                     db["stock_order"].append(new_sym)
@@ -635,165 +397,186 @@ if db.get("stocks"):
         st.sidebar.success(f"已刪除 {del_sym}")
         st.rerun()
 
-st.title("📜 個股歷史策略模擬與回測系統")
+st.title("📈 K 線與量價趨勢結構工具")
 
 col_bt1, col_bt2, col_bt3 = st.columns([2, 2, 2])
 with col_bt1:
     bt_symbol = st.selectbox(
-        "選擇回測標的",
+        "選擇觀察標的",
         options=stock_keys,
         format_func=lambda x: stock_options[x] if x in stock_options else x,
         key="bt_symbol"
     )
 with col_bt2:
-    default_start_str = db.get("bt_start", (datetime.now() - timedelta(days=730)).strftime("%Y-%m-%d"))
+    default_start_str = db.get("bt_start", (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d"))
     default_start = datetime.strptime(default_start_str, "%Y-%m-%d")
-    bt_start = st.date_input("回測開始日期", value=default_start)
+    bt_start = st.date_input("開始日期", value=default_start)
 with col_bt3:
     default_end_str = db.get("bt_end", datetime.now().strftime("%Y-%m-%d"))
     default_end = datetime.strptime(default_end_str, "%Y-%m-%d")
-    bt_end = st.date_input("回測結束日期", value=default_end)
+    bt_end = st.date_input("結束日期", value=default_end)
 
-col_cap1, col_cap2 = st.columns([2, 4])
-with col_cap1:
-    init_cap = float(db["stocks"].get(bt_symbol, {}).get("target_capital", 200000.0))
-    bt_capital = st.number_input("初始回測資金", min_value=10000.0, max_value=10000000.0, value=init_cap, step=50000.0)
-
-if st.button("🚀 開始歷史回測模擬", type="primary"):
+if st.button("🚀 載入K線與量價結構分析", type="primary"):
     start_str = bt_start.strftime("%Y-%m-%d")
     end_str = bt_end.strftime("%Y-%m-%d")
     
-    # 記憶回測時間區段
+    # 記憶瀏覽時間區段
     db["bt_start"] = start_str
     db["bt_end"] = end_str
     save_db(db)
 
-    with st.spinner(f"正在擷取 {bt_symbol} 行情數據與執行回測..."):
+    with st.spinner(f"正在擷取 {bt_symbol} 行情數據與計算量價指標..."):
         try:
-            fetch_start = (bt_start - timedelta(days=120)).strftime("%Y-%m-%d")
-            df_bt_raw, src_bt = cached_fetch_ohlc(bt_symbol, start_date=fetch_start, end_date=end_str)
+            fetch_start = (bt_start - timedelta(days=90)).strftime("%Y-%m-%d")
+            df_raw, src_bt = cached_fetch_ohlc(bt_symbol, start_date=fetch_start, end_date=end_str)
             
-            if df_bt_raw.empty or len(df_bt_raw) < 30:
-                st.error("歷史數據不足，無法執行回測。請確認代碼或重新選擇區間。")
+            if df_raw.empty or len(df_raw) < 10:
+                st.error("歷史數據不足，無法繪製K線圖。請確認代碼或重新選擇區間。")
             else:
-                backtester = StrategyBacktester(df_bt_raw, initial_capital=bt_capital, start_date=start_str, end_date=end_str)
-                df_equity, df_trades, df_kline = backtester.run()
+                df_calc = TechnicalAnalysisEngine.calculate_indicators(df_raw)
+                df_sub = df_calc.loc[start_str:end_str]
 
-                if df_equity.empty:
+                if df_sub.empty:
                     st.warning("選定日期區間內沒有可用的交易日行情數據。")
                 else:
-                    final_strat_val = df_equity["策略資產淨值"].iloc[-1]
-                    final_bench_val = df_equity["買入持有基準"].iloc[-1]
+                    latest = df_sub.iloc[-1]
                     
-                    strat_return = ((final_strat_val - bt_capital) / bt_capital) * 100.0
-                    bench_return = ((final_bench_val - bt_capital) / bt_capital) * 100.0
+                    st.markdown("---")
+                    st.markdown("#### 📊 最新量比與趨勢結構數據總覽")
+                    
+                    m1, m2, m3, m4, m5 = st.columns(5)
+                    
+                    # 1. 當日量比
+                    d_vr = latest['Daily_Vol_Ratio']
+                    m1.metric("當日量比 (對比5日均量)", f"{d_vr:.2f}" if not np.isnan(d_vr) else "N/A", 
+                              delta="放量" if d_vr >= 1.2 else ("縮量" if d_vr <= 0.8 else "持平"))
 
-                    equity_series = df_equity["策略資產淨值"]
-                    cummax = equity_series.cummax()
-                    drawdown = (equity_series - cummax) / cummax
-                    max_drawdown = drawdown.min() * 100.0 if not drawdown.empty else 0.0
+                    # 2. 5日量比 & 10日量比
+                    vr_5d = latest['Vol_Ratio_5D']
+                    vr_10d = latest['Vol_Ratio_10D']
+                    m2.metric("5日量比 / 10日量比", f"{vr_5d:.2f} / {vr_10d:.2f}" if not np.isnan(vr_5d) else "N/A")
 
-                    if not df_trades.empty and any(act in df_trades["動作"].values for act in ["全數賣出", "清倉離場"]):
-                        closed_trades = df_trades[df_trades["動作"].isin(["全數賣出", "清倉離場"])]
-                        win_count = len(closed_trades[closed_trades["損益"] > 0])
-                        total_closed = len(closed_trades)
-                        win_rate = (win_count / total_closed * 100.0) if total_closed > 0 else 0.0
+                    # 3. 5日內量價背離監控
+                    recent_5d = df_sub.iloc[-5:]
+                    has_bear_div = recent_5d['Bear_Divergence_5D'].any()
+                    has_bull_div = recent_5d['Bull_Divergence_5D'].any()
+                    
+                    if has_bear_div and has_bull_div:
+                        div_status = "⚠️ 頂背離與底背離交替"
+                    elif has_bear_div:
+                        div_status = "🚨 5日出現頂背離 (價高量縮)"
+                    elif has_bull_div:
+                        div_status = "🟢 5日出現底背離 (價低量增)"
                     else:
-                        win_rate = 0.0
-                        total_closed = 0
+                        div_status = "無明顯量價背離"
+                    m3.metric("5日內量價背離狀態", div_status)
 
-                    st.markdown("---")
-                    st.markdown("#### 📊 回測績效總覽")
+                    # 4. 均線金叉結構
+                    has_gc_5_10 = recent_5d['GC_MA5_MA10'].any()
+                    has_gc_5_20 = recent_5d['GC_MA5_MA20'].any()
+                    has_gc_10_20 = recent_5d['GC_MA10_MA20'].any()
                     
-                    b1, b2, b3, b4, b5 = st.columns(5)
-                    b1.metric("策略期末總資產", f"${final_strat_val:,.0f}")
-                    b2.metric("策略總累積報酬率", f"{strat_return:+.2f}%", delta=f"{strat_return - bench_return:+.2f}% vs 基準")
-                    b3.metric("買入持有 (Benchmark)", f"{bench_return:+.2f}%")
-                    b4.metric("最大資產回撤 (MDD)", f"{max_drawdown:.2f}%")
-                    b5.metric("出場/減碼勝率", f"{win_rate:.1f}%", f"共 {total_closed} 次操作")
+                    if has_gc_5_20 or has_gc_10_20:
+                        gc_status = "🚀 均線金叉 (強趨勢反轉預測)"
+                    elif has_gc_5_10:
+                        gc_status = "📈 MA5上穿MA10 (短線金叉)"
+                    else:
+                        gc_status = "無新金叉結構"
+                    m4.metric("均線金叉反轉結構", gc_status)
+
+                    # 5. 5日與20日看多/看空格局
+                    b5 = "看多 🟢" if latest['Bull_5D'] else ("看空 🔴" if latest['Bear_5D'] else "震盪 🟡")
+                    b20 = "看多 🟢" if latest['Bull_20D'] else ("看空 🔴" if latest['Bear_20D'] else "震盪 🟡")
+                    m5.metric("5日 / 20日格局", f"5日:{b5} | 20日:{b20}")
 
                     st.markdown("---")
-                    st.markdown("#### 🎯 K 線與 Buy / Sell 交易點位圖")
+                    st.markdown("#### 🎯 K線與成交量技術分析主圖")
 
-                    df_kline_sub = df_kline.loc[start_str:end_str]
-                    fig_kline = make_subplots(rows=1, cols=1, shared_xaxes=True)
+                    # 繪製主副圖 (Row 1: K線+MA, Row 2: 成交量)
+                    fig = make_subplots(
+                        rows=2, cols=1, 
+                        shared_xaxes=True, 
+                        vertical_spacing=0.05, 
+                        row_heights=[0.7, 0.3],
+                        subplot_titles=(f"{bt_symbol} K線與均線結構", "成交量與5日/10日均量線")
+                    )
 
-                    fig_kline.add_trace(go.Candlestick(
-                        x=df_kline_sub.index,
-                        open=df_kline_sub['Open'], high=df_kline_sub['High'],
-                        low=df_kline_sub['Low'], close=df_kline_sub['Close'],
+                    # K線圖
+                    fig.add_trace(go.Candlestick(
+                        x=df_sub.index,
+                        open=df_sub['Open'], high=df_sub['High'],
+                        low=df_sub['Low'], close=df_sub['Close'],
                         name='K線',
                         increasing_line_color='#26a69a', decreasing_line_color='#ef5350'
-                    ))
+                    ), row=1, col=1)
 
-                    fig_kline.add_trace(go.Scatter(x=df_kline_sub.index, y=df_kline_sub['MA5'], mode='lines', name='MA5', line=dict(color='#FF9800', width=1)))
-                    fig_kline.add_trace(go.Scatter(x=df_kline_sub.index, y=df_kline_sub['MA10'], mode='lines', name='MA10', line=dict(color='#2196F3', width=1)))
-                    fig_kline.add_trace(go.Scatter(x=df_kline_sub.index, y=df_kline_sub['MA20'], mode='lines', name='MA20', line=dict(color='#9C27B0', width=1.5)))
+                    # 均線
+                    fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['MA5'], mode='lines', name='MA5', line=dict(color='#FF9800', width=1.2)), row=1, col=1)
+                    fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['MA10'], mode='lines', name='MA10', line=dict(color='#2196F3', width=1.2)), row=1, col=1)
+                    fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['MA20'], mode='lines', name='MA20', line=dict(color='#9C27B0', width=1.5)), row=1, col=1)
+                    fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['MA60'], mode='lines', name='MA60', line=dict(color='#607D8B', width=1.5)), row=1, col=1)
 
-                    if not df_trades.empty:
-                        buys = df_trades[df_trades['類別'] == 'Buy']
-                        sells = df_trades[df_trades['類別'] == 'Sell']
+                    # 金叉標註點
+                    gc_points = df_sub[df_sub['GC_MA5_MA20'] | df_sub['GC_MA5_MA10']]
+                    if not gc_points.empty:
+                        fig.add_trace(go.Scatter(
+                            x=gc_points.index,
+                            y=gc_points['Low'] * 0.98,
+                            mode='markers+text',
+                            name='均線金叉點',
+                            marker=dict(symbol='triangle-up', size=11, color='#00E676'),
+                            text=['金叉' for _ in range(len(gc_points))],
+                            textposition='bottom center'
+                        ), row=1, col=1)
 
-                        if not buys.empty:
-                            fig_kline.add_trace(go.Scatter(
-                                x=buys['Date'],
-                                y=buys['成交價'] * 0.98,
-                                mode='markers+text',
-                                name='買進/加碼',
-                                marker=dict(symbol='triangle-up', size=14, color='#00E676'),
-                                text=buys['動作'],
-                                textposition='bottom center',
-                                hovertext=buys['原因']
-                            ))
+                    # 背離標註點
+                    div_points = df_sub[df_sub['Bear_Divergence_5D'] | df_sub['Bull_Divergence_5D']]
+                    if not div_points.empty:
+                        fig.add_trace(go.Scatter(
+                            x=div_points.index,
+                            y=div_points['High'] * 1.02,
+                            mode='markers+text',
+                            name='量價背離訊號',
+                            marker=dict(symbol='diamond', size=10, color='#FFD600'),
+                            text=['背離' for _ in range(len(div_points))],
+                            textposition='top center'
+                        ), row=1, col=1)
 
-                        if not sells.empty:
-                            fig_kline.add_trace(go.Scatter(
-                                x=sells['Date'],
-                                y=sells['成交價'] * 1.02,
-                                mode='markers+text',
-                                name='賣出/減碼',
-                                marker=dict(symbol='triangle-down', size=14, color='#FF1744'),
-                                text=sells['動作'],
-                                textposition='top center',
-                                hovertext=sells['原因']
-                            ))
+                    # 成交量柱狀圖
+                    colors = ['#26a69a' if c >= o else '#ef5350' for c, o in zip(df_sub['Close'], df_sub['Open'])]
+                    fig.add_trace(go.Bar(
+                        x=df_sub.index, y=df_sub['Volume'],
+                        name='成交量', marker_color=colors
+                    ), row=2, col=1)
 
-                    fig_kline.update_layout(
-                        title=f"{bt_symbol} 交易訊號發布對照圖",
-                        xaxis_title="日期",
-                        yaxis_title="價格",
+                    fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Vol_MA5'], mode='lines', name='5日均量', line=dict(color='#FF9800', width=1)), row=2, col=1)
+                    fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Vol_MA10'], mode='lines', name='10日均量', line=dict(color='#2196F3', width=1)), row=2, col=1)
+
+                    fig.update_layout(
                         xaxis_rangeslider_visible=False,
                         hovermode="x unified",
                         template="plotly_white",
-                        height=550
+                        height=650
                     )
-                    st.plotly_chart(fig_kline, use_container_width=True)
+                    st.plotly_chart(fig, use_container_width=True)
 
                     st.markdown("---")
-                    st.markdown("#### 📈 資產淨值成長曲線 vs 買入持有對照")
+                    st.markdown("#### 📜 每日技術指標與量比數據明細表")
+                    
+                    show_df = df_sub.copy()
+                    show_df['當日量比'] = show_df['Daily_Vol_Ratio'].round(2)
+                    show_df['5日量比'] = show_df['Vol_Ratio_5D'].round(2)
+                    show_df['10日量比'] = show_df['Vol_Ratio_10D'].round(2)
+                    show_df['5日格局'] = np.where(show_df['Bull_5D'], '看多 🟢', np.where(show_df['Bear_5D'], '看空 🔴', '震盪 🟡'))
+                    show_df['20日格局'] = np.where(show_df['Bull_20D'], '看多 🟢', np.where(show_df['Bear_20D'], '看空 🔴', '震盪 🟡'))
+                    
+                    show_df['背離標記'] = np.where(show_df['Bear_Divergence_5D'], '頂背離 🚨', np.where(show_df['Bull_Divergence_5D'], '底背離 🟢', '-'))
+                    show_df['金叉結構'] = np.where(show_df['GC_MA5_MA20'], 'MA5跨MA20 🚀', np.where(show_df['GC_MA5_MA10'], 'MA5跨MA10 📈', '-'))
 
-                    fig_eq = go.Figure()
-                    fig_eq.add_trace(go.Scatter(x=df_equity.index, y=df_equity["策略資產淨值"], mode='lines', name='動態溫控策略', line=dict(color='#2962FF', width=2)))
-                    fig_eq.add_trace(go.Scatter(x=df_equity.index, y=df_equity["買入持有基準"], mode='lines', name='買入持有基準 (Buy & Hold)', line=dict(color='#B0BEC5', width=1.5, dash='dash')))
-
-                    fig_eq.update_layout(
-                        title=f"{bt_symbol} 策略與大盤持有權益對比圖 ({start_str} ~ {end_str})",
-                        xaxis_title="日期",
-                        yaxis_title="資產總淨值",
-                        hovermode="x unified",
-                        template="plotly_white",
-                        height=400
-                    )
-                    st.plotly_chart(fig_eq, use_container_width=True)
-
-                    st.markdown("---")
-                    st.markdown("#### 📜 模擬交易進出場明細")
-                    if not df_trades.empty:
-                        cols_order = ["日期", "動作", "原因", "成交價", "股數", "損益", "報酬率", "當下倉位", "剩餘現金"]
-                        display_df = df_trades[cols_order]
-                        st.dataframe(display_df, use_container_width=True, hide_index=True)
-                    else:
-                        st.info("於此歷史區間內，未觸發任何買賣進場條件。")
+                    show_cols = ["Open", "High", "Low", "Close", "Volume", "當日量比", "5日量比", "10日量比", "5日格局", "20日格局", "背離標記", "金叉結構"]
+                    
+                    display_df = show_df[show_cols].sort_index(ascending=False)
+                    st.dataframe(display_df, use_container_width=True)
 
         except Exception as ex:
-            st.error(f"執行歷史回測失敗: {ex}")
+            st.error(f"載入數據失敗: {ex}")
