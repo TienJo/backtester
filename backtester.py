@@ -18,7 +18,7 @@ except ImportError:
     HAS_SORTABLES = False
 
 # ==========================================
-# 1. 多重備援與台股即時行情數據引擎
+# 1. 多重備援行情數據引擎
 # ==========================================
 class MultiSourceMarketData:
     def __init__(self):
@@ -34,7 +34,6 @@ class MultiSourceMarketData:
     def fetch_ohlc(self, symbol: str, start_date: str = None, end_date: str = None) -> tuple[pd.DataFrame, str]:
         clean_code = symbol.split('.')[0].upper()
 
-        # 歷史日 K 線擷取
         df = pd.DataFrame()
         src = "未知數據源"
 
@@ -78,7 +77,6 @@ class MultiSourceMarketData:
                 rt_data = self._fetch_twse_realtime(clean_code, symbol.endswith(".TWO"))
                 if rt_data:
                     rt_date = pd.to_datetime(rt_data['Date'])
-                    # 如果即時日期已存在於日 K，更新最後一筆，否則新增一筆即時數據
                     if rt_date in df.index:
                         df.loc[rt_date, 'Close'] = rt_data['Close']
                         df.loc[rt_date, 'High'] = max(df.loc[rt_date, 'High'], rt_data['High'])
@@ -97,7 +95,6 @@ class MultiSourceMarketData:
         return df, src
 
     def _fetch_twse_realtime(self, clean_code: str, is_otc: bool = False) -> dict:
-        """ 透過台灣證券交易所 MIS 官方 API 獲取台股盤中即時價格 """
         prefix = "otc" if is_otc else "tse"
         url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={prefix}_{clean_code}.tw"
         resp = requests.get(url, timeout=3)
@@ -105,7 +102,6 @@ class MultiSourceMarketData:
         
         if "msgArray" in data and len(data["msgArray"]) > 0:
             info = data["msgArray"][0]
-            # z: 當前最新成交價, z為"-"表示尚未有成交，改取 b(買進價) 或 y(昨收價)
             close_p = info.get("z")
             if not close_p or close_p == "-":
                 close_p = info.get("b", "").split("_")[0] or info.get("y")
@@ -260,7 +256,6 @@ class MultiSourceMarketData:
 
 data_engine = MultiSourceMarketData()
 
-# 為確保盤中能夠看到最新價格，將快取時間設為 15 秒
 @st.cache_data(ttl=15)
 def cached_fetch_ohlc(symbol: str, start_date: str = None, end_date: str = None):
     return data_engine.fetch_ohlc(symbol, start_date, end_date)
@@ -344,7 +339,6 @@ class TechnicalAnalysisEngine:
         df['Bull_20D'] = (df['Close'] > df['MA20']) & (ma20_diff > 0) & (df['MA5'] > df['MA20'])
         df['Bear_20D'] = (df['Close'] < df['MA20']) & (ma20_diff < 0) & (df['MA5'] < df['MA20'])
 
-        # 看多看空分析原因生成
         trend_reason_5d = []
         trend_reason_20d = []
 
@@ -362,7 +356,6 @@ class TechnicalAnalysisEngine:
             m5_d = ma5_diff.iloc[i]
             m20_d = ma20_diff.iloc[i]
 
-            # 5日原因
             if c > m5 and m5_d > 0:
                 trend_reason_5d.append(f"股價({c:.2f})站上MA5({m5:.2f})且5日線向上走揚，短線多頭掌控")
             elif c < m5 and m5_d < 0:
@@ -370,7 +363,6 @@ class TechnicalAnalysisEngine:
             else:
                 trend_reason_5d.append(f"股價與MA5糾結，短線處於橫盤震盪走勢")
 
-            # 20日原因
             if c > m20 and m20_d > 0 and m5 > m20:
                 if m10 > m20 and m20 > m60:
                     trend_reason_20d.append("均線呈現標準多頭排列(MA5>MA10>MA20>MA60)，波段趨勢極為強勁")
@@ -387,7 +379,7 @@ class TechnicalAnalysisEngine:
         df['Reason_5D'] = trend_reason_5d
         df['Reason_20D'] = trend_reason_20d
 
-        # 策略提醒與原因計算
+        # 策略提醒與原因計算 (優化頂背離判定)
         action_list = []
         reason_list = []
 
@@ -422,15 +414,19 @@ class TechnicalAnalysisEngine:
             macd_gc = (dif > dea) and (prev_dif <= prev_dea)
             macd_dc = (dif < dea) and (prev_dif >= prev_dea)
 
+            # 底背離判定
             price_10d_low = close_p < df['Close'].iloc[i-10:i].min()
             rsi_10d_low = rsi > df['RSI14'].iloc[i-10:i].min()
             macd_10d_low = dif > df['DIF'].iloc[i-10:i].min()
             bull_divergence = price_10d_low and rsi_10d_low and macd_10d_low
 
+            # 🛠️ 嚴格化頂背離判定：增加「RSI 處於高檔過熱區(>=65)」與「MACD 柱狀體開始萎縮」濾網，排除 V 轉暴沖誤判
             price_10d_high = close_p > df['Close'].iloc[i-10:i].max()
-            rsi_10d_high = rsi < df['RSI14'].iloc[i-10:i].max()
-            macd_10d_high = dif < df['DIF'].iloc[i-10:i].max()
-            bear_divergence = price_10d_high and rsi_10d_high and macd_10d_high
+            rsi_is_high = rsi >= 65.0
+            rsi_lower_than_peak = rsi < df['RSI14'].iloc[i-10:i].max()
+            macd_hist_shrink = hist < prev_hist
+            
+            bear_divergence = price_10d_high and rsi_is_high and rsi_lower_than_peak and macd_hist_shrink
 
             act = "觀望待變"
             rsn = "三指標處於常態區域，尚未觸發強勢突破或極端反轉"
@@ -440,7 +436,7 @@ class TechnicalAnalysisEngine:
                 rsn = "價格跌破布林中軌，且 MACD 轉向死亡交叉，確認轉弱"
             elif bear_divergence and (high_p >= bb_u * 0.995):
                 act = "⚠️ 背離獲利了結"
-                rsn = "價格創新高且觸及上軌，但 RSI/MACD 出現雙重頂背離，建議分批停利"
+                rsn = "價格高檔創新高且觸及上軌，但 RSI 與 MACD 柱狀體出現頂背離萎縮，建議分批停利"
             elif (close_p < prev_close) and (prev_close >= bb_u * 0.99) and macd_dc and (rsi < 50):
                 act = "🚨 標準轉弱離場"
                 rsn = "價格從上軌跌回中軌，伴隨 MACD 死叉與 RSI 跌破 50，趨勢結束"
@@ -629,7 +625,6 @@ if st.button("🚀 載入 K 線與三指標組合分析", type="primary"):
     start_str = bt_start.strftime("%Y-%m-%d")
     end_str = bt_end.strftime("%Y-%m-%d")
     
-    # 記憶瀏覽時間區段
     db["bt_start"] = start_str
     db["bt_end"] = end_str
     save_db(db)
@@ -652,7 +647,6 @@ if st.button("🚀 載入 K 線與三指標組合分析", type="primary"):
                     latest_date_str = df_sub.index[-1].strftime("%Y-%m-%d")
                     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-                    # 即時股價與更新時間看板
                     curr_price = latest['Close']
                     prev_p = df_calc.iloc[df_calc.index.get_loc(df_sub.index[-1]) - 1]['Close'] if len(df_calc) > len(df_sub) else latest['Open']
                     price_diff = curr_price - prev_p
@@ -673,7 +667,6 @@ if st.button("🚀 載入 K 線與三指標組合分析", type="primary"):
                     st.markdown("---")
                     st.markdown("#### 💡 當前最新策略操作建議與動態提醒")
                     
-                    # 提示橫幅
                     act_text = latest['Advice_Action']
                     rsn_text = latest['Advice_Reason']
                     
@@ -689,14 +682,11 @@ if st.button("🚀 載入 K 線與三指標組合分析", type="primary"):
                     st.markdown("---")
                     st.markdown("#### 📊 最新市場指標總覽")
                     
-                    # 使用 6 欄佈局避免最右側格局文字遭裁切，為格局欄位預留足夠寬度
                     m1, m2, m3, m4, m5, m6 = st.columns([1.2, 1.3, 1.2, 1.2, 1.1, 1.1])
                     
-                    # 1. 動態溫度 T
                     temp_val = latest['Temperature']
                     m1.metric("市場動態溫度 T", f"{temp_val:.1f}°C")
 
-                    # 2. 布林通道位置
                     close_p = latest['Close']
                     bb_u = latest['BB_Upper']
                     bb_m = latest['MA20']
@@ -712,7 +702,6 @@ if st.button("🚀 載入 K 線與三指標組合分析", type="primary"):
                         bb_pos_str = "中軌與下軌之間 📉"
                     m2.metric("布林通道位置", bb_pos_str)
 
-                    # 3. RSI(14) 近2日/5日變化
                     rsi_now = latest['RSI14']
                     rsi_diff_2 = latest['RSI_Diff_2D']
                     rsi_diff_5 = latest['RSI_Diff_5D']
@@ -720,20 +709,16 @@ if st.button("🚀 載入 K 線與三指標組合分析", type="primary"):
                     diff_5_str = f"{'▲' if rsi_diff_5 >= 0 else '▼'}{abs(rsi_diff_5):.2f}" if not np.isnan(rsi_diff_5) else "N/A"
                     m3.metric("RSI(14) 當前值", f"{rsi_now:.2f}", f"2日:{diff_2_str} | 5日:{diff_5_str}")
 
-                    # 4. MACD 狀態
                     dif_val = latest['DIF']
                     macd_tag = "0軸上方 (強勢)" if dif_val > 0 else "0軸下方 (弱勢)"
                     m4.metric("MACD 快線 (DIF)", f"{dif_val:.2f}", macd_tag)
 
-                    # 5. 5日格局獨立顯示
                     b5_tag = "看多 🟢" if latest['Bull_5D'] else ("看空 🔴" if latest['Bear_5D'] else "震盪 🟡")
                     m5.metric("5日短期格局", b5_tag)
 
-                    # 6. 20日格局獨立顯示 (防裁切)
                     b20_tag = "看多 🟢" if latest['Bull_20D'] else ("看空 🔴" if latest['Bear_20D'] else "震盪 🟡")
                     m6.metric("20日中期格局", b20_tag)
 
-                    # 看多與看空詳細分析原因區塊
                     st.markdown("---")
                     st.markdown("#### 🔍 多空格局技術面原因解析")
                     c_rs1, c_rs2 = st.columns(2)
@@ -758,7 +743,6 @@ if st.button("🚀 載入 K 線與三指標組合分析", type="primary"):
                         )
                     )
 
-                    # Row 1: K線 + 布林通道
                     fig.add_trace(go.Candlestick(
                         x=df_sub.index,
                         open=df_sub['Open'], high=df_sub['High'],
@@ -771,18 +755,15 @@ if st.button("🚀 載入 K 線與三指標組合分析", type="primary"):
                     fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['MA20'], mode='lines', name='布林中軌(MA20)', line=dict(color='#2196F3', width=1.5)), row=1, col=1)
                     fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['BB_Lower'], mode='lines', name='布林下軌', line=dict(color='#AB47BC', width=1, dash='dash')), row=1, col=1)
 
-                    # Row 2: 動態市場溫度 T
                     fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Temperature'], mode='lines', name='溫度 T', line=dict(color='#FF3D00', width=2)), row=2, col=1)
                     fig.add_hline(y=80, line_dash="dash", line_color="#FF1744", row=2, col=1)
                     fig.add_hline(y=35, line_dash="dash", line_color="#00E676", row=2, col=1)
 
-                    # Row 3: RSI(14)
                     fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['RSI14'], mode='lines', name='RSI(14)', line=dict(color='#00E5FF', width=1.5)), row=3, col=1)
                     fig.add_hline(y=70, line_dash="dot", line_color="#FF8A80", row=3, col=1)
                     fig.add_hline(y=50, line_dash="dash", line_color="#CCCCCC", row=3, col=1)
                     fig.add_hline(y=30, line_dash="dot", line_color="#B9F6CA", row=3, col=1)
 
-                    # Row 4: MACD
                     fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['DIF'], mode='lines', name='DIF (快線)', line=dict(color='#2962FF', width=1.2)), row=4, col=1)
                     fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['DEA'], mode='lines', name='DEA (慢線)', line=dict(color='#FF6D00', width=1.2)), row=4, col=1)
                     
