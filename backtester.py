@@ -278,6 +278,9 @@ class TechnicalAnalysisEngine:
         df['BB_Upper'] = df['MA20'] + (2.0 * std20)
         df['BB_Lower'] = df['MA20'] - (2.0 * std20)
         df['BB_Bandwidth'] = (df['BB_Upper'] - df['BB_Lower']) / df['MA20']
+        
+        # 計算布林上軌 5 日趨勢（當上前價格 vs 5 日前的布林上軌）
+        df['BB_Upper_5D_Diff'] = df['BB_Upper'].diff(5)
 
         # 2. 量能與量比
         df['Vol_MA5'] = df['Volume'].rolling(5).mean()
@@ -290,6 +293,7 @@ class TechnicalAnalysisEngine:
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
         rs = gain / loss
         df['RSI14'] = 100 - (100 / (1 + rs))
+        df['RSI_Diff_1D'] = df['RSI14'].diff(1)
         df['RSI_Diff_2D'] = df['RSI14'].diff(2)
         df['RSI_Diff_5D'] = df['RSI14'].diff(5)
 
@@ -379,9 +383,13 @@ class TechnicalAnalysisEngine:
         df['Reason_5D'] = trend_reason_5d
         df['Reason_20D'] = trend_reason_20d
 
-        # 策略提醒與原因計算
+        # 🛠️ 結合「建半倉 + 布林上軌擴張補滿倉」之策略引擎
         action_list = []
         reason_list = []
+
+        last_buy_index = -999  # 上次建倉索引
+        in_position = False    # 目前持倉狀態
+        position_ratio = 0.0   # 0.0: 無持倉, 0.5: 半倉, 1.0: 滿倉
 
         for i in range(len(df)):
             if i < 20:
@@ -397,11 +405,13 @@ class TechnicalAnalysisEngine:
             bb_u = df['BB_Upper'].iloc[i]
             bb_m = df['MA20'].iloc[i]
             bb_l = df['BB_Lower'].iloc[i]
+            bb_u_diff5 = df['BB_Upper_5D_Diff'].iloc[i]
+
             bw = df['BB_Bandwidth'].iloc[i]
             prev_bw = df['BB_Bandwidth'].iloc[i-1]
 
             rsi = df['RSI14'].iloc[i]
-            prev_rsi = df['RSI14'].iloc[i-1]
+            rsi_diff_1 = df['RSI_Diff_1D'].iloc[i]
 
             dif = df['DIF'].iloc[i]
             dea = df['DEA'].iloc[i]
@@ -410,52 +420,98 @@ class TechnicalAnalysisEngine:
 
             hist = df['MACD_Hist'].iloc[i]
             prev_hist = df['MACD_Hist'].iloc[i-1]
+            temp = df['Temperature'].iloc[i]
 
-            macd_gc = (dif > dea) and (prev_dif <= prev_dea)
             macd_dc = (dif < dea) and (prev_dif >= prev_dea)
 
-            price_10d_low = close_p < df['Close'].iloc[i-10:i].min()
-            rsi_10d_low = rsi > df['RSI14'].iloc[i-10:i].min()
-            macd_10d_low = dif > df['DIF'].iloc[i-10:i].min()
-            bull_divergence = price_10d_low and rsi_10d_low and macd_10d_low
+            # 🎯 條件 1: 近 5 日內 RSI 曾低於 30，且當日 RSI 單日強彈 >= 10 點
+            rsi_recent_oversold = (df['RSI14'].iloc[max(0, i-5):i+1] < 30.0).any()
+            rsi_surge_10 = rsi_diff_1 >= 10.0
 
+            # 🎯 條件 2: 價格站上 MA20 且布林上軌 5 日內呈上升趨勢 (bb_u_diff5 > 0)
+            above_ma20 = close_p >= bb_m
+            bb_upper_uptrend_5d = bb_u_diff5 > 0
+
+            # 近 3 日趨勢突破條件
+            macd_recent_gc = ((df['DIF'].iloc[max(0, i-2):i+1] > df['DEA'].iloc[max(0, i-2):i+1])).any()
+            rsi_recent_above_50 = (df['RSI14'].iloc[max(0, i-2):i+1] >= 50.0).any()
+
+            # 頂背離判定
             price_10d_high = close_p > df['Close'].iloc[i-10:i].max()
             rsi_is_high = rsi >= 65.0
             rsi_lower_than_peak = rsi < df['RSI14'].iloc[i-10:i].max()
             macd_hist_shrink = hist < prev_hist
-            
             bear_divergence = price_10d_high and rsi_is_high and rsi_lower_than_peak and macd_hist_shrink
+
+            # 停損條件 (連續 2 日跌破中軌且 MACD 偏弱)
+            prev_below_mid = df['Close'].iloc[i-1] < df['MA20'].iloc[i-1]
+            strict_stop_loss = (close_p < bb_m) and prev_below_mid and (dif < dea)
+
+            # 冷卻期判斷
+            cd_active = (i - last_buy_index) < 5
 
             act = "觀望待變"
             rsn = "三指標處於常態區域，尚未觸發強勢突破或極端反轉"
 
-            if close_p < bb_m and macd_dc:
+            # 🛑 1. 出場/停利優先判定
+            if strict_stop_loss:
                 act = "🛑 執行停損離場"
-                rsn = "價格跌破布林中軌，且 MACD 轉向死亡交叉，確認轉弱"
+                rsn = "股價連續2日跌破布林中軌且MACD死叉，波段轉弱全數出清"
+                in_position = False
+                position_ratio = 0.0
             elif bear_divergence and (high_p >= bb_u * 0.995):
                 act = "⚠️ 背離獲利了結"
-                rsn = "價格高檔創新高且觸及上軌，但 RSI 與 MACD 柱狀體出現頂背離萎縮，建議分批停利"
+                rsn = "價格高檔創新高但 RSI/MACD 出現頂背離，建議獲利離場"
+                in_position = False
+                position_ratio = 0.0
             elif (close_p < prev_close) and (prev_close >= bb_u * 0.99) and macd_dc and (rsi < 50):
                 act = "🚨 標準轉弱離場"
-                rsn = "價格從上軌跌回中軌，伴隨 MACD 死叉與 RSI 跌破 50，趨勢結束"
-            elif (bw < prev_bw) and (hist < prev_hist) and (hist > 0):
-                act = "⚡ 提前減碼示警"
-                rsn = "布林通道開始收窄（波動下降）且 MACD 柱狀體連續縮小，建議減碼觀望"
-            elif (bw > prev_bw) and (dif > 0) and macd_gc and (prev_rsi <= 50) and (rsi > 50):
-                act = "🚀 趨勢啟動做多"
-                rsn = "布林擴張 + MACD 0軸上金叉 + RSI 由50下方站上50，三條件同步，多頭訊號強"
-            elif (low_p <= bb_l) and (rsi < 30) and (bull_divergence or (hist > prev_hist)):
-                act = "🟢 極端反轉試單"
-                rsn = "觸及布林下軌 + RSI<30 超賣 + MACD 底背離/止跌，三重確認，可分批試單做多"
-            elif (high_p >= bb_u) and (rsi >= 70) and (hist > 0) and (hist >= prev_hist):
-                act = "🔥 強勢軌道游走"
-                rsn = "股價沿布林上軌游走且 RSI 高檔鈍化，此為極強趨勢；若拉回中軌不破可加碼"
+                rsn = "價格跌回中軌且跌破 RSI 50，趨勢結束離場"
+                in_position = False
+                position_ratio = 0.0
+
+            # 🟢 2. 抄底第一步：RSI 低位暴強彈 —— 建半倉
+            elif not in_position and not cd_active and rsi_recent_oversold and rsi_surge_10:
+                act = "🟢 RSI強彈(建半倉)"
+                rsn = f"近5日曾進入超賣區(RSI<30)，今日RSI爆發大漲{rsi_diff_1:.1f}點，買盤強勢介入，建議試單建半倉"
+                last_buy_index = i
+                in_position = True
+                position_ratio = 0.5
+
+            # 🚀 3. 抄底第二步：站上 MA20 + 布林上軌5日走揚 —— 補滿倉 (加碼)
+            elif (position_ratio == 0.5) and above_ma20 and bb_upper_uptrend_5d:
+                act = "🚀 趨勢擴張(補滿倉)"
+                rsn = f"已有半倉，今日股價成功站上MA20({bb_m:.2f})且布林上軌5日持續走揚，波段多頭確立，建議補滿倉"
+                last_buy_index = i
+                position_ratio = 1.0
+
+            # 🚀 4. 常規趨勢突破建倉 (無半倉直接建滿倉)
+            elif not in_position and not cd_active and (bw > prev_bw) and macd_recent_gc and rsi_recent_above_50 and above_ma20 and (temp <= 75.0) and (rsi <= 72.0):
+                act = "🚀 趨勢啟動(建倉)"
+                rsn = "布林開口擴張 + MACD零軸上強勢 + RSI站穩50，多頭趨勢確立，建議建倉"
+                last_buy_index = i
+                in_position = True
+                position_ratio = 1.0
+
+            # 📈 5. 持倉期間的動態維護
+            elif in_position:
+                if (dif > 0) and (rsi > 50) and (abs(low_p - bb_m) / bb_m <= 0.015) and above_ma20 and (i - last_buy_index > 3):
+                    act = "📈 順勢拉回(加碼)"
+                    rsn = "持倉中，股價拉回測試布林中軌(MA20)獲支撐，可分批加碼"
+                elif (high_p >= bb_u) and (rsi >= 70) and (hist > 0):
+                    act = "🔥 強勢軌道游走"
+                    rsn = f"持倉中({int(position_ratio*100)}%)，股價沿布林上軌強勢游走，主升段續抱"
+                else:
+                    act = "✊ 續抱觀察"
+                    rsn = f"持倉中({int(position_ratio*100)}%)，行情沿趨勢運行，請繼續持股觀望"
+
+            # ⚠️ 6. 常態警示
             elif (close_p > bb_u) and (rsi < 70) and (hist <= prev_hist):
                 act = "⚠️ 警惕假突破"
-                rsn = "突破布林上軌，但 RSI 未過 70 且 MACD 柱狀體未同步放大，假突破誘多機率高"
+                rsn = "突破布林上軌，但 RSI 未過 70 且 MACD 柱狀體未放大，假突破機率高不宜追"
             elif bw < 0.08:
                 act = "🟡 盤整變盤在即"
-                rsn = "布林極度收窄（縮口），變盤在即；請靜待 MACD 翻正與 RSI 突破 50"
+                rsn = "布林極度收窄（縮口），變盤在即；靜待 MACD 翻正與 RSI 突破 50"
 
             action_list.append(act)
             reason_list.append(rsn)
@@ -672,7 +728,7 @@ if st.button("🚀 載入 K 線與三指標組合分析", type="primary"):
                         st.error(f"**【操作建議】{act_text}** — {rsn_text}")
                     elif "減碼" in act_text or "假突破" in act_text or "警惕" in act_text:
                         st.warning(f"**【操作建議】{act_text}** — {rsn_text}")
-                    elif "趨勢啟動" in act_text or "做多" in act_text or "極端反轉" in act_text:
+                    elif "趨勢" in act_text or "建倉" in act_text or "建半倉" in act_text or "補滿倉" in act_text or "加碼" in act_text or "續抱" in act_text:
                         st.success(f"**【操作建議】{act_text}** — {rsn_text}")
                     else:
                         st.info(f"**【操作建議】{act_text}** — {rsn_text}")
@@ -741,7 +797,6 @@ if st.button("🚀 載入 K 線與三指標組合分析", type="primary"):
                         )
                     )
 
-                    # Row 1: K線 + MA均線 + 布林通道
                     fig.add_trace(go.Candlestick(
                         x=df_sub.index,
                         open=df_sub['Open'], high=df_sub['High'],
@@ -750,28 +805,23 @@ if st.button("🚀 載入 K 線與三指標組合分析", type="primary"):
                         increasing_line_color='#26a69a', decreasing_line_color='#ef5350'
                     ), row=1, col=1)
 
-                    # 均線繪製 (MA5, MA10, MA20, MA60)
                     fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['MA5'], mode='lines', name='MA5', line=dict(color='#FF9800', width=1.2)), row=1, col=1)
                     fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['MA10'], mode='lines', name='MA10', line=dict(color='#00BCD4', width=1.2)), row=1, col=1)
                     fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['MA20'], mode='lines', name='MA20(布林中軌)', line=dict(color='#2196F3', width=1.5)), row=1, col=1)
                     fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['MA60'], mode='lines', name='MA60(季線)', line=dict(color='#78909C', width=1.5)), row=1, col=1)
 
-                    # 布林通道上軌與下軌
                     fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['BB_Upper'], mode='lines', name='布林上軌', line=dict(color='#AB47BC', width=1, dash='dash')), row=1, col=1)
                     fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['BB_Lower'], mode='lines', name='布林下軌', line=dict(color='#AB47BC', width=1, dash='dash')), row=1, col=1)
 
-                    # Row 2: 動態市場溫度 T
                     fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Temperature'], mode='lines', name='溫度 T', line=dict(color='#FF3D00', width=2)), row=2, col=1)
                     fig.add_hline(y=80, line_dash="dash", line_color="#FF1744", row=2, col=1)
                     fig.add_hline(y=35, line_dash="dash", line_color="#00E676", row=2, col=1)
 
-                    # Row 3: RSI(14)
                     fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['RSI14'], mode='lines', name='RSI(14)', line=dict(color='#00E5FF', width=1.5)), row=3, col=1)
                     fig.add_hline(y=70, line_dash="dot", line_color="#FF8A80", row=3, col=1)
                     fig.add_hline(y=50, line_dash="dash", line_color="#CCCCCC", row=3, col=1)
                     fig.add_hline(y=30, line_dash="dot", line_color="#B9F6CA", row=3, col=1)
 
-                    # Row 4: MACD
                     fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['DIF'], mode='lines', name='DIF (快線)', line=dict(color='#2962FF', width=1.2)), row=4, col=1)
                     fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['DEA'], mode='lines', name='DEA (慢線)', line=dict(color='#FF6D00', width=1.2)), row=4, col=1)
                     
