@@ -274,12 +274,15 @@ class TechnicalAnalysisEngine:
         df['MA20'] = df['Close'].rolling(20).mean()
         df['MA60'] = df['Close'].rolling(60).mean()
 
+        # 布林中軌（MA20）之單日差值（趨勢方向）
+        df['MA20_Diff'] = df['MA20'].diff(1)
+
         std20 = df['Close'].rolling(20).std()
         df['BB_Upper'] = df['MA20'] + (2.0 * std20)
         df['BB_Lower'] = df['MA20'] - (2.0 * std20)
         df['BB_Bandwidth'] = (df['BB_Upper'] - df['BB_Lower']) / df['MA20']
         
-        # 計算布林上軌 5 日趨勢
+        # 布林上軌 5 日趨勢
         df['BB_Upper_5D_Diff'] = df['BB_Upper'].diff(5)
 
         # 2. 量能與量比
@@ -383,7 +386,7 @@ class TechnicalAnalysisEngine:
         df['Reason_5D'] = trend_reason_5d
         df['Reason_20D'] = trend_reason_20d
 
-        # 🛠️ 策略分析引擎 (含修改後的 MACD死叉 + 現價低於MA20*1.02 離場條件)
+        # 🛠️ 策略引擎：複合離場條件 (死叉 + 低高於MA20 2% + 布林中軌向下 + 前10日過熱)
         action_list = []
         reason_list = []
 
@@ -402,6 +405,7 @@ class TechnicalAnalysisEngine:
 
             bb_u = df['BB_Upper'].iloc[i]
             bb_m = df['MA20'].iloc[i]
+            ma20_diff = df['MA20_Diff'].iloc[i]
             bb_u_diff5 = df['BB_Upper_5D_Diff'].iloc[i]
             bw = df['BB_Bandwidth'].iloc[i]
 
@@ -415,13 +419,22 @@ class TechnicalAnalysisEngine:
             hist = df['MACD_Hist'].iloc[i]
             prev_hist = df['MACD_Hist'].iloc[i-1]
 
-            # 🎯 判定 1: MACD 當天死亡交叉 (DIF 由上往下穿越 DEA)
+            # 🎯 條件 A: 當天 MACD 出現死叉
             macd_dc = (dif < dea) and (prev_dif >= prev_dea)
 
-            # 🎯 判定 2: 現價高於 MA20 不到 2%（或已跌破 MA20）
-            price_near_or_below_ma20 = (close_p - bb_m) / bb_m <= 0.02
+            # 🎯 條件 B: 現價高於 MA20 不到 2% (相當於 close_p <= bb_m * 1.02)
+            near_or_below_ma20 = close_p <= (bb_m * 1.02)
 
-            # 🎯【建倉條件】：近 5 日內 RSI 曾低於 30，且當日 RSI 單日強彈 >= 8 點
+            # 🎯 條件 C: 布林中軌趨勢向下
+            ma20_downtrend = ma20_diff < 0
+
+            # 🎯 條件 D: 前 10 日市場溫度曾超過 80 度
+            temp_over_80_in_10d = (df['Temperature'].iloc[max(0, i-10):i] > 80.0).any()
+
+            # 🛑 綜合離場觸發判定
+            strict_exit_triggered = macd_dc and near_or_below_ma20 and ma20_downtrend and temp_over_80_in_10d
+
+            # 🎯【唯一建倉條件】：近 5 日內 RSI 曾低於 30，且當日 RSI 單日強彈 >= 8 點
             rsi_recent_oversold = (df['RSI14'].iloc[max(0, i-5):i+1] < 30.0).any()
             rsi_surge_8 = rsi_diff_1 >= 8.0
 
@@ -440,13 +453,12 @@ class TechnicalAnalysisEngine:
             cd_active = (i - last_buy_index) < 5
 
             act = "觀望待變"
-            rsn = "三指標處於常態區域，未達 RSI<30 且強彈 >8 點之建倉門檻"
+            rsn = "三指標處於常態區域，未達建倉或複合離場門檻"
 
-            # 🛑 1. 修改後的離場條件：MACD當天死叉 + 現價高於MA20不到2% (全數清倉)
-            if macd_dc and price_near_or_below_ma20:
-                pct_above_ma20 = ((close_p - bb_m) / bb_m) * 100.0
-                act = "🛑 MACD死叉+破中軌防線(全數離場)"
-                rsn = f"當日MACD死叉，且現價與MA20幅離僅{pct_above_ma20:+.2f}%(<=2%)，防守線失守，果斷清倉離場"
+            # 🛑 1. 複合離場條件 —— 無條件清倉離場 (最高優先級)
+            if strict_exit_triggered:
+                act = "🛑 滿足複合條件(無條件清倉)"
+                rsn = "MACD死叉 + 現價低於MA20+2% + 中軌下彎 + 前10日溫度暴增>80，反轉確立無條件清倉"
                 in_position = False
                 position_ratio = 0.0
 
@@ -457,7 +469,7 @@ class TechnicalAnalysisEngine:
                 in_position = False
                 position_ratio = 0.0
 
-            # 🟢 3. 建半倉條件：RSI 超賣 + 單日強彈 >= 8 點
+            # 🟢 3.【唯一建半倉條件】：RSI 超賣 + 單日強彈 >= 8 點
             elif not in_position and not cd_active and rsi_recent_oversold and rsi_surge_8:
                 act = "🟢 RSI強彈(建半倉)"
                 rsn = f"近5日曾進入超賣區(RSI<30)，今日RSI爆發大漲{rsi_diff_1:.1f}點(>=8)，買盤強勢介入，建議試單建半倉"
@@ -465,7 +477,7 @@ class TechnicalAnalysisEngine:
                 in_position = True
                 position_ratio = 0.5
 
-            # 🚀 4. 補滿倉條件：站上 MA20 + 布林上軌5日走揚 —— 補滿倉
+            # 🚀 4. 抄底第二步：站上 MA20 + 布林上軌5日走揚 —— 補滿倉 (加碼)
             elif (position_ratio == 0.5) and above_ma20 and bb_upper_uptrend_5d:
                 act = "🚀 趨勢擴張(補滿倉)"
                 rsn = f"已有半倉，今日股價成功站上MA20({bb_m:.2f})且布林上軌5日持續走揚，波段多頭確立，建議補滿倉"
@@ -700,7 +712,7 @@ if st.button("🚀 載入 K 線與三指標組合分析", type="primary"):
                     act_text = latest['Advice_Action']
                     rsn_text = latest['Advice_Reason']
                     
-                    if "停損" in act_text or "死叉" in act_text or "離場" in act_text:
+                    if "停損" in act_text or "清倉" in act_text or "離場" in act_text:
                         st.error(f"**【操作建議】{act_text}** — {rsn_text}")
                     elif "減碼" in act_text or "假突破" in act_text or "警惕" in act_text:
                         st.warning(f"**【操作建議】{act_text}** — {rsn_text}")
