@@ -18,7 +18,7 @@ except ImportError:
     HAS_SORTABLES = False
 
 # ==========================================
-# 1. 多重備援行情數據引擎
+# 1. 多重備援與台股即時行情數據引擎
 # ==========================================
 class MultiSourceMarketData:
     def __init__(self):
@@ -34,36 +34,99 @@ class MultiSourceMarketData:
     def fetch_ohlc(self, symbol: str, start_date: str = None, end_date: str = None) -> tuple[pd.DataFrame, str]:
         clean_code = symbol.split('.')[0].upper()
 
+        # 歷史日 K 線擷取
+        df = pd.DataFrame()
+        src = "未知數據源"
+
         try:
             df = self._fetch_eastmoney(symbol, clean_code, start_date, end_date)
             if not df.empty and len(df) >= 10:
-                return df, "東方財富 (EastMoney)"
+                src = "東方財富 (EastMoney)"
         except Exception:
             pass
 
-        if clean_code.isdigit() and len(clean_code) == 6:
+        if df.empty and clean_code.isdigit() and len(clean_code) == 6:
             try:
                 df = self._fetch_eastmoney_fund(clean_code)
                 if not df.empty and len(df) >= 10:
-                    return df, "天天基金 (Tiantian Fund)"
+                    src = "天天基金 (Tiantian Fund)"
             except Exception:
                 pass
 
-        try:
-            df = self._fetch_tencent(symbol, clean_code)
-            if not df.empty and len(df) >= 10:
-                return df, "騰訊財經 (Tencent)"
-        except Exception:
-            pass
+        if df.empty:
+            try:
+                df = self._fetch_tencent(symbol, clean_code)
+                if not df.empty and len(df) >= 10:
+                    src = "騰訊財經 (Tencent)"
+            except Exception:
+                pass
 
-        try:
-            df = self._fetch_yfinance(symbol, start_date, end_date)
-            if not df.empty and len(df) >= 10:
-                return df, "yfinance (備用)"
-        except Exception:
-            pass
+        if df.empty:
+            try:
+                df = self._fetch_yfinance(symbol, start_date, end_date)
+                if not df.empty and len(df) >= 10:
+                    src = "yfinance (備用)"
+            except Exception:
+                pass
 
-        raise ValueError(f"無法獲取 {symbol} 行情數據，請確認代碼是否正確。")
+        if df.empty:
+            raise ValueError(f"無法獲取 {symbol} 行情數據，請確認代碼是否正確。")
+
+        # 針對台股標的試圖獲取證交所 (TWSE) 盤中即時股價
+        if symbol.endswith(".TW") or symbol.endswith(".TWO"):
+            try:
+                rt_data = self._fetch_twse_realtime(clean_code, symbol.endswith(".TWO"))
+                if rt_data:
+                    rt_date = pd.to_datetime(rt_data['Date'])
+                    # 如果即時日期已存在於日 K，更新最後一筆，否則新增一筆即時數據
+                    if rt_date in df.index:
+                        df.loc[rt_date, 'Close'] = rt_data['Close']
+                        df.loc[rt_date, 'High'] = max(df.loc[rt_date, 'High'], rt_data['High'])
+                        df.loc[rt_date, 'Low'] = min(df.loc[rt_date, 'Low'], rt_data['Low'])
+                    else:
+                        new_row = pd.DataFrame([{
+                            "Open": rt_data['Open'], "High": rt_data['High'],
+                            "Low": rt_data['Low'], "Close": rt_data['Close'],
+                            "Volume": rt_data['Volume']
+                        }], index=[rt_date])
+                        df = pd.concat([df, new_row])
+                    src += " + 證交所(TWSE)盤中即時"
+            except Exception:
+                pass
+
+        return df, src
+
+    def _fetch_twse_realtime(self, clean_code: str, is_otc: bool = False) -> dict:
+        """ 透過台灣證券交易所 MIS 官方 API 獲取台股盤中即時價格 """
+        prefix = "otc" if is_otc else "tse"
+        url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={prefix}_{clean_code}.tw"
+        resp = requests.get(url, timeout=3)
+        data = resp.json()
+        
+        if "msgArray" in data and len(data["msgArray"]) > 0:
+            info = data["msgArray"][0]
+            # z: 當前最新成交價, z為"-"表示尚未有成交，改取 b(買進價) 或 y(昨收價)
+            close_p = info.get("z")
+            if not close_p or close_p == "-":
+                close_p = info.get("b", "").split("_")[0] or info.get("y")
+            
+            if close_p and close_p != "-":
+                open_p = float(info.get("o", close_p) if info.get("o") != "-" else close_p)
+                high_p = float(info.get("h", close_p) if info.get("h") != "-" else close_p)
+                low_p = float(info.get("l", close_p) if info.get("l") != "-" else close_p)
+                vol = float(info.get("v", 0) if info.get("v") != "-" else 0)
+                d_str = info.get("d", datetime.now().strftime("%Y%m%d"))
+                formatted_date = f"{d_str[:4]}-{d_str[4:6]}-{d_str[6:]}"
+
+                return {
+                    "Date": formatted_date,
+                    "Open": open_p,
+                    "High": high_p,
+                    "Low": low_p,
+                    "Close": float(close_p),
+                    "Volume": vol
+                }
+        return None
 
     def _fetch_eastmoney_fund(self, fund_code: str) -> pd.DataFrame:
         url = "https://api.fund.eastmoney.com/f10/lsjz"
@@ -197,7 +260,8 @@ class MultiSourceMarketData:
 
 data_engine = MultiSourceMarketData()
 
-@st.cache_data(ttl=300)
+# 為確保盤中能夠看到最新價格，將快取時間設為 15 秒
+@st.cache_data(ttl=15)
 def cached_fetch_ohlc(symbol: str, start_date: str = None, end_date: str = None):
     return data_engine.fetch_ohlc(symbol, start_date, end_date)
 
