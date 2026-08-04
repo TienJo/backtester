@@ -379,7 +379,7 @@ class TechnicalAnalysisEngine:
         df['Reason_5D'] = trend_reason_5d
         df['Reason_20D'] = trend_reason_20d
 
-        # 策略提醒與原因計算 (優化頂背離判定)
+        # 策略提醒與原因計算
         action_list = []
         reason_list = []
 
@@ -414,13 +414,11 @@ class TechnicalAnalysisEngine:
             macd_gc = (dif > dea) and (prev_dif <= prev_dea)
             macd_dc = (dif < dea) and (prev_dif >= prev_dea)
 
-            # 底背離判定
             price_10d_low = close_p < df['Close'].iloc[i-10:i].min()
             rsi_10d_low = rsi > df['RSI14'].iloc[i-10:i].min()
             macd_10d_low = dif > df['DIF'].iloc[i-10:i].min()
             bull_divergence = price_10d_low and rsi_10d_low and macd_10d_low
 
-            # 🛠️ 嚴格化頂背離判定：增加「RSI 處於高檔過熱區(>=65)」與「MACD 柱狀體開始萎縮」濾網，排除 V 轉暴沖誤判
             price_10d_high = close_p > df['Close'].iloc[i-10:i].max()
             rsi_is_high = rsi >= 65.0
             rsi_lower_than_peak = rsi < df['RSI14'].iloc[i-10:i].max()
@@ -728,7 +726,7 @@ if st.button("🚀 載入 K 線與三指標組合分析", type="primary"):
                         st.info(f"**📌 20日中期格局原因：** {latest['Reason_20D']}")
 
                     st.markdown("---")
-                    st.markdown("#### 🎯 K線(含布林通道)、市場溫度、RSI 與 MACD 四圖對照")
+                    st.markdown("#### 🎯 K線(含均線MA5/10/20/60與布林通道)、市場溫度、RSI 與 MACD 四圖對照")
 
                     fig = make_subplots(
                         rows=4, cols=1, 
@@ -736,13 +734,14 @@ if st.button("🚀 載入 K 線與三指標組合分析", type="primary"):
                         vertical_spacing=0.03, 
                         row_heights=[0.4, 0.2, 0.2, 0.2],
                         subplot_titles=(
-                            f"{bt_symbol} K線與布林通道 (上軌/中軌/下軌)", 
+                            f"{bt_symbol} K線、MA5/10/20/60 均線與布林通道", 
                             "動態市場溫度 T (0-100)", 
                             "RSI(14) 指標", 
                             "MACD 指標 (DIF, DEA, 柱狀圖)"
                         )
                     )
 
+                    # Row 1: K線 + MA均線 + 布林通道
                     fig.add_trace(go.Candlestick(
                         x=df_sub.index,
                         open=df_sub['Open'], high=df_sub['High'],
@@ -751,19 +750,28 @@ if st.button("🚀 載入 K 線與三指標組合分析", type="primary"):
                         increasing_line_color='#26a69a', decreasing_line_color='#ef5350'
                     ), row=1, col=1)
 
+                    # 均線繪製 (MA5, MA10, MA20, MA60)
+                    fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['MA5'], mode='lines', name='MA5', line=dict(color='#FF9800', width=1.2)), row=1, col=1)
+                    fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['MA10'], mode='lines', name='MA10', line=dict(color='#00BCD4', width=1.2)), row=1, col=1)
+                    fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['MA20'], mode='lines', name='MA20(布林中軌)', line=dict(color='#2196F3', width=1.5)), row=1, col=1)
+                    fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['MA60'], mode='lines', name='MA60(季線)', line=dict(color='#78909C', width=1.5)), row=1, col=1)
+
+                    # 布林通道上軌與下軌
                     fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['BB_Upper'], mode='lines', name='布林上軌', line=dict(color='#AB47BC', width=1, dash='dash')), row=1, col=1)
-                    fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['MA20'], mode='lines', name='布林中軌(MA20)', line=dict(color='#2196F3', width=1.5)), row=1, col=1)
                     fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['BB_Lower'], mode='lines', name='布林下軌', line=dict(color='#AB47BC', width=1, dash='dash')), row=1, col=1)
 
+                    # Row 2: 動態市場溫度 T
                     fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Temperature'], mode='lines', name='溫度 T', line=dict(color='#FF3D00', width=2)), row=2, col=1)
                     fig.add_hline(y=80, line_dash="dash", line_color="#FF1744", row=2, col=1)
                     fig.add_hline(y=35, line_dash="dash", line_color="#00E676", row=2, col=1)
 
+                    # Row 3: RSI(14)
                     fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['RSI14'], mode='lines', name='RSI(14)', line=dict(color='#00E5FF', width=1.5)), row=3, col=1)
                     fig.add_hline(y=70, line_dash="dot", line_color="#FF8A80", row=3, col=1)
                     fig.add_hline(y=50, line_dash="dash", line_color="#CCCCCC", row=3, col=1)
                     fig.add_hline(y=30, line_dash="dot", line_color="#B9F6CA", row=3, col=1)
 
+                    # Row 4: MACD
                     fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['DIF'], mode='lines', name='DIF (快線)', line=dict(color='#2962FF', width=1.2)), row=4, col=1)
                     fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['DEA'], mode='lines', name='DEA (慢線)', line=dict(color='#FF6D00', width=1.2)), row=4, col=1)
                     
