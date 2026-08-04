@@ -383,7 +383,7 @@ class TechnicalAnalysisEngine:
         df['Reason_5D'] = trend_reason_5d
         df['Reason_20D'] = trend_reason_20d
 
-        # 🛠️ 僅保留「RSI 超賣強彈建半倉」作為唯一進場門檻之策略引擎
+        # 🛠️ 策略引擎：包含「MACD死叉 且 現價高於MA20不到3%無條件清倉」
         action_list = []
         reason_list = []
 
@@ -417,6 +417,9 @@ class TechnicalAnalysisEngine:
 
             # 🎯 MACD 當天死亡交叉 (DIF 由上往下穿越 DEA)
             macd_dc = (dif < dea) and (prev_dif >= prev_dea)
+            
+            # 🎯 現價高於 MA20 不到 3% (即 close_p < bb_m * 1.03)
+            close_near_or_below_ma20 = close_p < (bb_m * 1.03)
 
             # 🎯【唯一建倉條件】：近 5 日內 RSI 曾低於 30，且當日 RSI 單日強彈 >= 8 點
             rsi_recent_oversold = (df['RSI14'].iloc[max(0, i-5):i+1] < 30.0).any()
@@ -439,10 +442,10 @@ class TechnicalAnalysisEngine:
             act = "觀望待變"
             rsn = "三指標處於常態區域，未達 RSI<30 且強彈 >8 點之唯一建倉門檻"
 
-            # 🛑 1. MACD 當天死叉 —— 果斷全數離場 (最高優先級)
-            if macd_dc:
-                act = "🛑 MACD死叉(全數離場)"
-                rsn = "當日 MACD 出現死亡交叉（DIF向下穿越DEA），多頭動能耗盡，果斷全數清倉離場"
+            # 🛑 1. MACD 當天死叉 且 現價高於 MA20 不到 3% —— 果斷全數清倉離場 (最高優先級)
+            if macd_dc and close_near_or_below_ma20:
+                act = "🛑 MACD死叉+貼近中軌(全數離場)"
+                rsn = f"當日 MACD 出現死叉，且現價(${close_p:.2f})高於MA20(${bb_m:.2f})不到3%，支撐力道不足，無條件清倉離場"
                 in_position = False
                 position_ratio = 0.0
 
