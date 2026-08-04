@@ -279,7 +279,7 @@ class TechnicalAnalysisEngine:
         df['BB_Lower'] = df['MA20'] - (2.0 * std20)
         df['BB_Bandwidth'] = (df['BB_Upper'] - df['BB_Lower']) / df['MA20']
         
-        # 計算布林上軌 5 日趨勢（當上前價格 vs 5 日前的布林上軌）
+        # 計算布林上軌 5 日趨勢
         df['BB_Upper_5D_Diff'] = df['BB_Upper'].diff(5)
 
         # 2. 量能與量比
@@ -383,7 +383,7 @@ class TechnicalAnalysisEngine:
         df['Reason_5D'] = trend_reason_5d
         df['Reason_20D'] = trend_reason_20d
 
-        # 🛠️ 結合「建半倉 + 布林上軌擴張補滿倉」之策略引擎
+        # 🛠️ 結合「MACD 死叉當日即走」之策略引擎
         action_list = []
         reason_list = []
 
@@ -422,13 +422,14 @@ class TechnicalAnalysisEngine:
             prev_hist = df['MACD_Hist'].iloc[i-1]
             temp = df['Temperature'].iloc[i]
 
+            # 🎯 MACD 當天死亡交叉 (DIF 由上往下穿越 DEA)
             macd_dc = (dif < dea) and (prev_dif >= prev_dea)
 
-            # 🎯 條件 1: 近 5 日內 RSI 曾低於 30，且當日 RSI 單日強彈 >= 10 點
+            # 🎯 抄底第一步條件: 近 5 日內 RSI 曾低於 30，且當日 RSI 單日強彈 >= 10 點
             rsi_recent_oversold = (df['RSI14'].iloc[max(0, i-5):i+1] < 30.0).any()
             rsi_surge_10 = rsi_diff_1 >= 10.0
 
-            # 🎯 條件 2: 價格站上 MA20 且布林上軌 5 日內呈上升趨勢 (bb_u_diff5 > 0)
+            # 🎯 抄底第二步條件: 價格站上 MA20 且布林上軌 5 日內呈上升趨勢
             above_ma20 = close_p >= bb_m
             bb_upper_uptrend_5d = bb_u_diff5 > 0
 
@@ -443,34 +444,27 @@ class TechnicalAnalysisEngine:
             macd_hist_shrink = hist < prev_hist
             bear_divergence = price_10d_high and rsi_is_high and rsi_lower_than_peak and macd_hist_shrink
 
-            # 停損條件 (連續 2 日跌破中軌且 MACD 偏弱)
-            prev_below_mid = df['Close'].iloc[i-1] < df['MA20'].iloc[i-1]
-            strict_stop_loss = (close_p < bb_m) and prev_below_mid and (dif < dea)
-
             # 冷卻期判斷
             cd_active = (i - last_buy_index) < 5
 
             act = "觀望待變"
             rsn = "三指標處於常態區域，尚未觸發強勢突破或極端反轉"
 
-            # 🛑 1. 出場/停利優先判定
-            if strict_stop_loss:
-                act = "🛑 執行停損離場"
-                rsn = "股價連續2日跌破布林中軌且MACD死叉，波段轉弱全數出清"
+            # 🛑 1. MACD 當天死叉 —— 果斷全數離場 (最高優先級)
+            if macd_dc:
+                act = "🛑 MACD死叉(全數離場)"
+                rsn = "當日 MACD 出現死亡交叉（DIF向下穿越DEA），多頭動能耗盡，果斷全數清倉離場"
                 in_position = False
                 position_ratio = 0.0
+
+            # ⚠️ 2. 高檔頂背離 —— 提前停利離場
             elif bear_divergence and (high_p >= bb_u * 0.995):
                 act = "⚠️ 背離獲利了結"
                 rsn = "價格高檔創新高但 RSI/MACD 出現頂背離，建議獲利離場"
                 in_position = False
                 position_ratio = 0.0
-            elif (close_p < prev_close) and (prev_close >= bb_u * 0.99) and macd_dc and (rsi < 50):
-                act = "🚨 標準轉弱離場"
-                rsn = "價格跌回中軌且跌破 RSI 50，趨勢結束離場"
-                in_position = False
-                position_ratio = 0.0
 
-            # 🟢 2. 抄底第一步：RSI 低位暴強彈 —— 建半倉
+            # 🟢 3. 抄底第一步：RSI 低位暴強彈 —— 建半倉
             elif not in_position and not cd_active and rsi_recent_oversold and rsi_surge_10:
                 act = "🟢 RSI強彈(建半倉)"
                 rsn = f"近5日曾進入超賣區(RSI<30)，今日RSI爆發大漲{rsi_diff_1:.1f}點，買盤強勢介入，建議試單建半倉"
@@ -478,14 +472,14 @@ class TechnicalAnalysisEngine:
                 in_position = True
                 position_ratio = 0.5
 
-            # 🚀 3. 抄底第二步：站上 MA20 + 布林上軌5日走揚 —— 補滿倉 (加碼)
+            # 🚀 4. 抄底第二步：站上 MA20 + 布林上軌5日走揚 —— 補滿倉 (加碼)
             elif (position_ratio == 0.5) and above_ma20 and bb_upper_uptrend_5d:
                 act = "🚀 趨勢擴張(補滿倉)"
                 rsn = f"已有半倉，今日股價成功站上MA20({bb_m:.2f})且布林上軌5日持續走揚，波段多頭確立，建議補滿倉"
                 last_buy_index = i
                 position_ratio = 1.0
 
-            # 🚀 4. 常規趨勢突破建倉 (無半倉直接建滿倉)
+            # 🚀 5. 常規趨勢突破建倉 (無半倉直接建滿倉)
             elif not in_position and not cd_active and (bw > prev_bw) and macd_recent_gc and rsi_recent_above_50 and above_ma20 and (temp <= 75.0) and (rsi <= 72.0):
                 act = "🚀 趨勢啟動(建倉)"
                 rsn = "布林開口擴張 + MACD零軸上強勢 + RSI站穩50，多頭趨勢確立，建議建倉"
@@ -493,7 +487,7 @@ class TechnicalAnalysisEngine:
                 in_position = True
                 position_ratio = 1.0
 
-            # 📈 5. 持倉期間的動態維護
+            # 📈 6. 持倉期間的動態維護
             elif in_position:
                 if (dif > 0) and (rsi > 50) and (abs(low_p - bb_m) / bb_m <= 0.015) and above_ma20 and (i - last_buy_index > 3):
                     act = "📈 順勢拉回(加碼)"
@@ -505,7 +499,7 @@ class TechnicalAnalysisEngine:
                     act = "✊ 續抱觀察"
                     rsn = f"持倉中({int(position_ratio*100)}%)，行情沿趨勢運行，請繼續持股觀望"
 
-            # ⚠️ 6. 常態警示
+            # ⚠️ 7. 常態警示
             elif (close_p > bb_u) and (rsi < 70) and (hist <= prev_hist):
                 act = "⚠️ 警惕假突破"
                 rsn = "突破布林上軌，但 RSI 未過 70 且 MACD 柱狀體未放大，假突破機率高不宜追"
@@ -724,7 +718,7 @@ if st.button("🚀 載入 K 線與三指標組合分析", type="primary"):
                     act_text = latest['Advice_Action']
                     rsn_text = latest['Advice_Reason']
                     
-                    if "停損" in act_text or "清倉" in act_text or "離場" in act_text:
+                    if "停損" in act_text or "死叉" in act_text or "離場" in act_text:
                         st.error(f"**【操作建議】{act_text}** — {rsn_text}")
                     elif "減碼" in act_text or "假突破" in act_text or "警惕" in act_text:
                         st.warning(f"**【操作建議】{act_text}** — {rsn_text}")
