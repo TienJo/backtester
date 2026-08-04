@@ -383,7 +383,7 @@ class TechnicalAnalysisEngine:
         df['Reason_5D'] = trend_reason_5d
         df['Reason_20D'] = trend_reason_20d
 
-        # 🛠️ 結合「MACD 死叉當日即走」之策略引擎
+        # 🛠️ 唯一建倉條件：RSI 超賣爆發強彈建半倉
         action_list = []
         reason_list = []
 
@@ -398,17 +398,14 @@ class TechnicalAnalysisEngine:
                 continue
 
             close_p = df['Close'].iloc[i]
-            prev_close = df['Close'].iloc[i-1]
             high_p = df['High'].iloc[i]
             low_p = df['Low'].iloc[i]
 
             bb_u = df['BB_Upper'].iloc[i]
             bb_m = df['MA20'].iloc[i]
-            bb_l = df['BB_Lower'].iloc[i]
             bb_u_diff5 = df['BB_Upper_5D_Diff'].iloc[i]
 
             bw = df['BB_Bandwidth'].iloc[i]
-            prev_bw = df['BB_Bandwidth'].iloc[i-1]
 
             rsi = df['RSI14'].iloc[i]
             rsi_diff_1 = df['RSI_Diff_1D'].iloc[i]
@@ -420,22 +417,17 @@ class TechnicalAnalysisEngine:
 
             hist = df['MACD_Hist'].iloc[i]
             prev_hist = df['MACD_Hist'].iloc[i-1]
-            temp = df['Temperature'].iloc[i]
 
             # 🎯 MACD 當天死亡交叉 (DIF 由上往下穿越 DEA)
             macd_dc = (dif < dea) and (prev_dif >= prev_dea)
 
-            # 🎯 抄底第一步條件: 近 5 日內 RSI 曾低於 30，且當日 RSI 單日強彈 >= 10 點
+            # 🎯 唯一建倉入口條件：近 5 日內 RSI 曾低於 30，且當日 RSI 單日強彈 >= 10 點
             rsi_recent_oversold = (df['RSI14'].iloc[max(0, i-5):i+1] < 30.0).any()
             rsi_surge_10 = rsi_diff_1 >= 10.0
 
-            # 🎯 抄底第二步條件: 價格站上 MA20 且布林上軌 5 日內呈上升趨勢
+            # 🎯 補滿倉條件：已有半倉 + 價格站上 MA20 + 布林上軌 5 日內呈上升趨勢
             above_ma20 = close_p >= bb_m
             bb_upper_uptrend_5d = bb_u_diff5 > 0
-
-            # 近 3 日趨勢突破條件
-            macd_recent_gc = ((df['DIF'].iloc[max(0, i-2):i+1] > df['DEA'].iloc[max(0, i-2):i+1])).any()
-            rsi_recent_above_50 = (df['RSI14'].iloc[max(0, i-2):i+1] >= 50.0).any()
 
             # 頂背離判定
             price_10d_high = close_p > df['Close'].iloc[i-10:i].max()
@@ -448,7 +440,7 @@ class TechnicalAnalysisEngine:
             cd_active = (i - last_buy_index) < 5
 
             act = "觀望待變"
-            rsn = "三指標處於常態區域，尚未觸發強勢突破或極端反轉"
+            rsn = "指標處於常態區域，尚未符合唯一建倉條件 (RSI<30 後強彈>10)"
 
             # 🛑 1. MACD 當天死叉 —— 果斷全數離場 (最高優先級)
             if macd_dc:
@@ -464,7 +456,7 @@ class TechnicalAnalysisEngine:
                 in_position = False
                 position_ratio = 0.0
 
-            # 🟢 3. 抄底第一步：RSI 低位暴強彈 —— 建半倉
+            # 🟢 3. 唯一建倉入口：RSI 低位暴強彈 —— 建半倉
             elif not in_position and not cd_active and rsi_recent_oversold and rsi_surge_10:
                 act = "🟢 RSI強彈(建半倉)"
                 rsn = f"近5日曾進入超賣區(RSI<30)，今日RSI爆發大漲{rsi_diff_1:.1f}點，買盤強勢介入，建議試單建半倉"
@@ -479,15 +471,7 @@ class TechnicalAnalysisEngine:
                 last_buy_index = i
                 position_ratio = 1.0
 
-            # 🚀 5. 常規趨勢突破建倉 (無半倉直接建滿倉)
-            elif not in_position and not cd_active and (bw > prev_bw) and macd_recent_gc and rsi_recent_above_50 and above_ma20 and (temp <= 75.0) and (rsi <= 72.0):
-                act = "🚀 趨勢啟動(建倉)"
-                rsn = "布林開口擴張 + MACD零軸上強勢 + RSI站穩50，多頭趨勢確立，建議建倉"
-                last_buy_index = i
-                in_position = True
-                position_ratio = 1.0
-
-            # 📈 6. 持倉期間的動態維護
+            # 📈 5. 持倉期間的動態維護
             elif in_position:
                 if (dif > 0) and (rsi > 50) and (abs(low_p - bb_m) / bb_m <= 0.015) and above_ma20 and (i - last_buy_index > 3):
                     act = "📈 順勢拉回(加碼)"
@@ -499,7 +483,7 @@ class TechnicalAnalysisEngine:
                     act = "✊ 續抱觀察"
                     rsn = f"持倉中({int(position_ratio*100)}%)，行情沿趨勢運行，請繼續持股觀望"
 
-            # ⚠️ 7. 常態警示
+            # ⚠️ 6. 常態警示
             elif (close_p > bb_u) and (rsi < 70) and (hist <= prev_hist):
                 act = "⚠️ 警惕假突破"
                 rsn = "突破布林上軌，但 RSI 未過 70 且 MACD 柱狀體未放大，假突破機率高不宜追"
