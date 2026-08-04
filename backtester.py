@@ -387,25 +387,24 @@ class TechnicalAnalysisEngine:
         df['Reason_5D'] = trend_reason_5d
         df['Reason_20D'] = trend_reason_20d
 
-        # 🛠️ 策略引擎：模式 A (含3日跌破2%硬停損) + 模式 B (風控修復)
+        # 🛠️ 策略引擎：整合硬性防衛機制 A（價格止損）與 B（時間止損）
         action_list = []
         reason_list = []
 
         sub_start_dt = pd.to_datetime(display_start_date) if display_start_date else df.index[0]
 
-        last_buy_index = -999  # 上次建倉索引
-        in_position = False    # 目前持倉狀態
-        position_ratio = 0.0   # 0.0: 無持倉, 0.5: 半倉, 1.0: 滿倉
-        entry_mode = ""        # 記錄建倉模式 ("A" 或 "B")
+        last_buy_index = -999   # 上次建倉索引
+        in_position = False     # 目前持倉狀態
+        position_ratio = 0.0    # 0.0: 無持倉, 0.5: 半倉, 1.0: 滿倉
+        entry_mode = ""         # 記錄建倉模式 ("A" 或 "B")
         
-        # 模式 A 專用風控狀態變數
-        mode_a_entry_index = -999        # 模式 A 建倉點索引
-        mode_a_entry_low = 0.0           # 模式 A 建倉當天 K 棒最低點
+        # 建倉風控紀錄
+        entry_index = -999      # 建倉 K 棒索引
+        entry_price = 0.0       # 建倉當天收盤價 (用於虧損%計算)
+        entry_low = 0.0         # 建倉當天 K 棒最低價 (Low_Entry)
 
         # 模式 B 專用風控狀態變數
-        mode_b_veto_active = False       # 背離否決模式 B 開倉狀態
-        mode_b_entry_index = -999        # 模式 B 建倉點索引
-        mode_b_entry_low = 0.0           # 模式 B 建倉當天 K 棒最低點
+        mode_b_veto_active = False
 
         for i in range(len(df)):
             current_date = df.index[i]
@@ -509,25 +508,22 @@ class TechnicalAnalysisEngine:
             mode_b2_buy = cond_b2_ma_align and cond_b2_new_high and cond_b2_long_red
 
             # ----------------------------------------------------
-            # 🛑【離場條件與停損機制】
+            # 🛑【硬性防衛機制 A 與 B 判斷】
             # ----------------------------------------------------
+            days_held = i - entry_index
+            
+            # 🛡️ 硬性防衛機制 A（價格止損）：收盤跌破 Low_Entry 或 帳面虧損達 3%
+            loss_pct = (close_p - entry_price) / entry_price if entry_price > 0 else 0.0
+            hard_stop_loss_a = in_position and ((close_p < entry_low) or (loss_pct <= -0.03))
+
+            # 🛡️ 硬性防衛機制 B（時間/橫盤止損）：5交易日內未創建倉以來新高
+            max_high_since_entry = df['High'].iloc[entry_index:i+1].max() if (in_position and days_held >= 1) else 0.0
+            no_new_high_in_5d = in_position and (days_held == 5) and (max_high_since_entry <= entry_price)
+
+            # MACD 訊號離場
             macd_dc = (dif < dea) and (prev_dif >= prev_dea)
             macd_dc_and_below_ma20 = macd_dc and (close_p < m20)
             macd_dc_above_ma20 = macd_dc and (close_p >= m20)
-
-            # 🚨【模式 A 專用：3 日跌破建倉日低點 2% 硬停損】
-            days_since_mode_a = i - mode_a_entry_index
-            mode_a_3d_stop_loss = False
-            if in_position and (entry_mode == "A") and (1 <= days_since_mode_a <= 3):
-                if low_p < (mode_a_entry_low * 0.98):
-                    mode_a_3d_stop_loss = True
-
-            # 🚨【模式 B 專用：3 日認錯硬砍倉】
-            days_since_mode_b = i - mode_b_entry_index
-            mode_b_3d_failed = False
-            if in_position and (entry_mode == "B") and (1 <= days_since_mode_b <= 3):
-                if low_p < mode_b_entry_low:
-                    mode_b_3d_failed = True
 
             # 補滿倉條件
             above_ma20 = close_p >= m20
@@ -539,29 +535,35 @@ class TechnicalAnalysisEngine:
             act = "觀望待變"
             rsn = "指標未符合【模式A抄底】或【模式B主升浪順勢突破】之建倉門檻"
 
-            # 🛑 1. MACD 死叉且跌破 MA20 (100% 清倉)
-            if macd_dc_and_below_ma20 and in_position:
+            # 🛑 1. 🛡️ 硬性防衛機制 A (價格止損：100% 強制清倉)
+            if hard_stop_loss_a:
+                reason_detail = f"收盤價(${close_p:.2f})跌破建倉日最低價(${entry_low:.2f})" if close_p < entry_low else f"帳面虧損達 {loss_pct*100:.1f}% (超過3%止損線)"
+                act = "🛑 硬性價格止損(100%無條件清倉)"
+                rsn = f"觸發硬性防衛機制 A：{reason_detail}，強制100%無條件清倉避險，防止虧損擴大"
+                in_position = False
+                position_ratio = 0.0
+                entry_mode = ""
+
+            # 🛑 2. MACD 死叉且跌破 MA20 (100% 清倉)
+            elif macd_dc_and_below_ma20 and in_position:
                 act = "🛑 MACD死叉+跌破MA20(100%清倉)"
                 rsn = f"MACD出現死叉且股價({close_p:.2f})跌破MA20({m20:.2f})，趨勢轉空，全數清倉避險"
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
 
-            # 🛑 2.【模式 A 專用】3 日跌破低點 2% 強制停損
-            elif mode_a_3d_stop_loss and in_position:
-                act = "🛑 模式A 3日硬停損(跌破低點2%)"
-                rsn = f"模式A抄底後3交易日內跌破建倉當天低點(${mode_a_entry_low:.2f})的2% (門檻:${mode_a_entry_low * 0.98:.2f})，認定抄底失敗立刻100%清倉出場"
-                in_position = False
-                position_ratio = 0.0
-                entry_mode = ""
-
-            # 🛑 3.【模式 B 專用】3 日認錯硬砍倉
-            elif mode_b_3d_failed and in_position:
-                act = "🛑 模式B 3日認錯(即刻砍倉)"
-                rsn = f"模式B入場後3交易日內跌破建倉日最低點(${mode_b_entry_low:.2f})，認定為假訊號，無條件100%清倉退場"
-                in_position = False
-                position_ratio = 0.0
-                entry_mode = ""
+            # ⏳ 3. 🛡️ 硬性防衛機制 B (時間/橫盤止損：減倉半倉或清倉退場)
+            elif no_new_high_in_5d:
+                if position_ratio > 0.5:
+                    act = "⚠️ 硬性時間止損(減倉至半倉)"
+                    rsn = f"觸發硬性防衛機制 B：建倉後5個交易日價格未創新高(最高價:${max_high_since_entry:.2f} <= 建倉價:${entry_price:.2f})，多頭動能停滯，無條件自動減倉至半倉"
+                    position_ratio = 0.5
+                else:
+                    act = "🛑 硬性時間止損(全數清倉退場)"
+                    rsn = f"觸發硬性防衛機制 B：建倉後5個交易日橫盤未創新高，多頭動能停滯，將剩餘半倉無條件清倉退場，提升資金利用率"
+                    in_position = False
+                    position_ratio = 0.0
+                    entry_mode = ""
 
             # ⚠️ 4. MACD 死叉但仍高於 MA20 (洗盤死叉，減倉至半倉)
             elif macd_dc_above_ma20 and in_position and (position_ratio > 0.5):
@@ -574,8 +576,9 @@ class TechnicalAnalysisEngine:
                 act = "🟢 模式A:超賣強彈(建半倉)"
                 rsn = f"【模式A抄底】近5日內曾RSI<30，今日RSI暴漲{rsi_diff_1:.1f}點(>=8)，觸發抄底試單半倉"
                 last_buy_index = i
-                mode_a_entry_index = i
-                mode_a_entry_low = low_p
+                entry_index = i
+                entry_price = close_p
+                entry_low = low_p
                 in_position = True
                 position_ratio = 0.5
                 entry_mode = "A"
@@ -598,8 +601,9 @@ class TechnicalAnalysisEngine:
                     act = "🟢 模式B1:強勢回檔再發動(建半倉)"
                     rsn = f"【模式B主升浪】多頭格局下RSI回到40-50區間重新拉升，且踩MA20後收陽線站回MA5，建議建半倉"
                     last_buy_index = i
-                    mode_b_entry_index = i
-                    mode_b_entry_low = low_p
+                    entry_index = i
+                    entry_price = close_p
+                    entry_low = low_p
                     in_position = True
                     position_ratio = 0.5
                     entry_mode = "B"
@@ -620,8 +624,9 @@ class TechnicalAnalysisEngine:
                         act = "🟢 模式B2:平台突破(建半倉)"
                         rsn = f"【模式B2平台突破】多頭排列下收盤創近15日新高，實體長紅站上布林上軌，開倉建半倉"
                         last_buy_index = i
-                        mode_b_entry_index = i
-                        mode_b_entry_low = low_p
+                        entry_index = i
+                        entry_price = close_p
+                        entry_low = low_p
                         in_position = True
                         position_ratio = 0.5
                         entry_mode = "B"
@@ -863,7 +868,7 @@ if st.button("🚀 載入 K 線與雙模式策略分析", type="primary"):
                     act_text = latest['Advice_Action']
                     rsn_text = latest['Advice_Reason']
                     
-                    if "100%清倉" in act_text or "離場" in act_text or "砍倉" in act_text or "停損" in act_text:
+                    if "清倉" in act_text or "離場" in act_text or "止損" in act_text:
                         st.error(f"**【操作建議】{act_text}** — {rsn_text}")
                     elif "被禁用" in act_text or "否決" in act_text or "減倉" in act_text or "警惕" in act_text:
                         st.warning(f"**【操作建議】{act_text}** — {rsn_text}")
