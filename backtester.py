@@ -384,7 +384,7 @@ class TechnicalAnalysisEngine:
         df['Reason_5D'] = trend_reason_5d
         df['Reason_20D'] = trend_reason_20d
 
-        # 🛠️ 策略引擎：精簡持倉維護（移除順勢拉回加碼）
+        # 🛠️ 策略引擎：更新離場條件（新增 3 日內溫度 > 80）
         action_list = []
         reason_list = []
 
@@ -416,16 +416,20 @@ class TechnicalAnalysisEngine:
             prev_dea = df['DEA'].iloc[i-1]
             hist = df['MACD_Hist'].iloc[i]
 
-            # 🎯 離場條件解析：
-            # 1. 當天 MACD 死叉
+            # 🎯 離場條件步驟拆解：
+            # 步驟 1: 當天 MACD 出現死叉
             macd_dc = (dif < dea) and (prev_dif >= prev_dea)
-            # 2. 現價高於 MA20 不到 2% (即 Close < MA20 * 1.02)
+            
+            # 步驟 2: 現價高於 MA20 不到 2% (Close < MA20 * 1.02)
             price_near_or_below_ma20 = close_p < (bb_m * 1.02)
-            # 3. MA20 趨勢向下 (MA20_Diff_1D < 0)
+            
+            # 步驟 3: MA20 趨勢向下 OR 近 3 日內有一天的市場溫度 > 80 度
             ma20_downtrend = ma20_diff1 < 0
+            temp_over_80_in_3d = (df['Temperature'].iloc[max(0, i-2):i+1] > 80.0).any()
+            step3_condition = ma20_downtrend or temp_over_80_in_3d
 
-            # 三條件完全滿足時觸發離場
-            strict_exit_triggered = macd_dc and price_near_or_below_ma20 and ma20_downtrend
+            # 三個步驟同時成立時發動清倉
+            strict_exit_triggered = macd_dc and price_near_or_below_ma20 and step3_condition
 
             # 🎯【唯一建倉條件】：近 5 日內 RSI 曾低於 30，且當日 RSI 單日強彈 >= 8 點
             rsi_recent_oversold = (df['RSI14'].iloc[max(0, i-5):i+1] < 30.0).any()
@@ -443,8 +447,14 @@ class TechnicalAnalysisEngine:
 
             # 🛑 1. 複合條件嚴格離場 (最高優先級)
             if strict_exit_triggered:
+                trigger_reason = []
+                if ma20_downtrend:
+                    trigger_reason.append("MA20趨勢向下")
+                if temp_over_80_in_3d:
+                    trigger_reason.append("3日內市場溫度過熱(>80°C)")
+
                 act = "🛑 複合條件滿足(全數清倉)"
-                rsn = f"同時滿足：①MACD當日死叉 ②現價({close_p:.2f})高於MA20({bb_m:.2f})不足2% ③MA20趨勢向下，多頭結構破壞全數離場"
+                rsn = f"同時滿足：①MACD當日死叉 ②現價({close_p:.2f})高於MA20({bb_m:.2f})不足2% ③{'與'.join(trigger_reason)}，多頭結構破壞全數離場"
                 in_position = False
                 position_ratio = 0.0
 
@@ -463,7 +473,7 @@ class TechnicalAnalysisEngine:
                 last_buy_index = i
                 position_ratio = 1.0
 
-            # 📈 4. 持倉期間的動態維護（已移除順勢拉回加碼）
+            # 📈 4. 持倉期間的動態維護
             elif in_position:
                 if (high_p >= bb_u) and (rsi >= 70) and (hist > 0):
                     act = "🔥 強勢軌道游走"
