@@ -451,7 +451,6 @@ class TechnicalAnalysisEngine:
 
             # ----------------------------------------------------
             # 🚨【修復方案一：MA60 扣抵方向與位置判斷】（熊市總開關，僅限模式B）
-            # 條件：MA60 扣抵向下 (今日 MA60 < 60天前 MA60) 且 現價 < MA60
             # ----------------------------------------------------
             ma60_60d_ago = df['MA60'].iloc[i-60] if i >= 60 else df['MA60'].iloc[0]
             is_ma60_down = m60 < ma60_60d_ago
@@ -484,7 +483,7 @@ class TechnicalAnalysisEngine:
             weak_hook_filter = temp_ma10_declining and (temp_val < 50.0)
 
             # ----------------------------------------------------
-            # 🎯【模式 A：抄底 / 波段打底】（保持獨立，不受熊市關閉與水下防禦影響）
+            # 🎯【模式 A：抄底 / 波段打底】
             # ----------------------------------------------------
             rsi_recent_oversold = (df['RSI14'].iloc[max(0, i-4):i+1] < 30.0).any()
             rsi_surge_8 = rsi_diff_1 >= 8.0
@@ -548,7 +547,7 @@ class TechnicalAnalysisEngine:
                 position_ratio = 0.0
                 entry_mode = ""
 
-            # 🟢 4.【模式 A 建半倉】（獨立運行，不受模式 B 濾網限制）
+            # 🟢 4.【模式 A 建半倉】
             elif not in_position and not cd_active and mode_a_buy:
                 act = "🟢 模式A:超賣強彈(建半倉)"
                 rsn = f"【模式A抄底】近5日內曾RSI<30，今日RSI暴漲{rsi_diff_1:.1f}點(>=8)，觸發抄底試單半倉"
@@ -557,7 +556,7 @@ class TechnicalAnalysisEngine:
                 position_ratio = 0.5
                 entry_mode = "A"
 
-            # 🟢 5.【模式 B1 建半倉】：強勢回檔再發動（實裝三項修復方案限制）
+            # 🟢 5.【模式 B1 建半倉】：強勢回檔再發動
             elif not in_position and not cd_active and mode_b1_buy:
                 if is_bear_market:
                     act = "🚫 模式B1被禁用(熊市狀態)"
@@ -581,7 +580,7 @@ class TechnicalAnalysisEngine:
                     position_ratio = 0.5
                     entry_mode = "B"
 
-            # 🟢 6.【模式 B2 建倉/加碼】：平台突破長紅（實裝三項修復方案限制）
+            # 🟢 6.【模式 B2 建倉/加碼】：平台突破長紅
             elif not cd_active and mode_b2_buy:
                 if is_bear_market:
                     act = "🚫 模式B2被禁用(熊市狀態)"
@@ -774,204 +773,308 @@ if db.get("stocks"):
 
 st.title("📈 布林通道 + MACD + RSI 雙模式趨勢分析工具")
 
-col_bt1, col_bt2, col_bt3 = st.columns([2, 2, 2])
-with col_bt1:
-    bt_symbol = st.selectbox(
-        "選擇觀察標的",
-        options=stock_keys,
-        format_func=lambda x: stock_options[x] if x in stock_options else x,
-        key="bt_symbol"
-    )
-with col_bt2:
-    default_start_str = db.get("bt_start", (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d"))
-    default_start = datetime.strptime(default_start_str, "%Y-%m-%d")
-    bt_start = st.date_input("開始日期", value=default_start)
-with col_bt3:
-    default_end_str = db.get("bt_end", datetime.now().strftime("%Y-%m-%d"))
-    default_end = datetime.strptime(default_end_str, "%Y-%m-%d")
-    bt_end = st.date_input("結束日期", value=default_end)
+# 使用分頁區隔功能
+tab1, tab2 = st.tabs(["🔍 單一標的 K 線分析", "⚡ 自選清單一鍵全掃瞄"])
 
-if st.button("🚀 載入 K 線與雙模式策略分析", type="primary"):
-    start_str = bt_start.strftime("%Y-%m-%d")
-    end_str = bt_end.strftime("%Y-%m-%d")
-    
-    db["bt_start"] = start_str
-    db["bt_end"] = end_str
-    save_db(db)
+with tab1:
+    col_bt1, col_bt2, col_bt3 = st.columns([2, 2, 2])
+    with col_bt1:
+        bt_symbol = st.selectbox(
+            "選擇觀察標的",
+            options=stock_keys,
+            format_func=lambda x: stock_options[x] if x in stock_options else x,
+            key="bt_symbol"
+        )
+    with col_bt2:
+        default_start_str = db.get("bt_start", (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d"))
+        default_start = datetime.strptime(default_start_str, "%Y-%m-%d")
+        bt_start = st.date_input("開始日期", value=default_start, key="bt_start_input")
+    with col_bt3:
+        default_end_str = db.get("bt_end", datetime.now().strftime("%Y-%m-%d"))
+        default_end = datetime.strptime(default_end_str, "%Y-%m-%d")
+        bt_end = st.date_input("結束日期", value=default_end, key="bt_end_input")
 
-    with st.spinner(f"正在擷取 {bt_symbol} 行情數據與計算雙模式布林+MACD+RSI..."):
-        try:
-            fetch_start = (bt_start - timedelta(days=120)).strftime("%Y-%m-%d")
-            df_raw, src_bt = cached_fetch_ohlc(bt_symbol, start_date=fetch_start, end_date=end_str)
-            
-            if df_raw.empty or len(df_raw) < 10:
-                st.error("歷史數據不足，無法繪製K線圖。請確認代碼或重新選擇區間。")
-            else:
-                df_calc = TechnicalAnalysisEngine.calculate_indicators(df_raw, display_start_date=start_str)
-                df_sub = df_calc.loc[start_str:end_str]
+    if st.button("🚀 載入 K 線與雙模式策略分析", type="primary"):
+        start_str = bt_start.strftime("%Y-%m-%d")
+        end_str = bt_end.strftime("%Y-%m-%d")
+        
+        db["bt_start"] = start_str
+        db["bt_end"] = end_str
+        save_db(db)
 
-                if df_sub.empty:
-                    st.warning("選定日期區間內沒有可用的交易日行情數據。")
+        with st.spinner(f"正在擷取 {bt_symbol} 行情數據與計算雙模式布林+MACD+RSI..."):
+            try:
+                fetch_start = (bt_start - timedelta(days=120)).strftime("%Y-%m-%d")
+                df_raw, src_bt = cached_fetch_ohlc(bt_symbol, start_date=fetch_start, end_date=end_str)
+                
+                if df_raw.empty or len(df_raw) < 10:
+                    st.error("歷史數據不足，無法繪製K線圖。請確認代碼或重新選擇區間。")
                 else:
-                    latest = df_sub.iloc[-1]
-                    latest_date_str = df_sub.index[-1].strftime("%Y-%m-%d")
-                    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    df_calc = TechnicalAnalysisEngine.calculate_indicators(df_raw, display_start_date=start_str)
+                    df_sub = df_calc.loc[start_str:end_str]
 
-                    curr_price = latest['Close']
-                    prev_p = df_calc.iloc[df_calc.index.get_loc(df_sub.index[-1]) - 1]['Close'] if len(df_calc) > len(df_sub) else latest['Open']
-                    price_diff = curr_price - prev_p
-                    price_pct = (price_diff / prev_p) * 100.0 if prev_p > 0 else 0.0
-
-                    st.markdown("---")
-                    p_col1, p_col2 = st.columns([2, 4])
-                    with p_col1:
-                        st.metric(
-                            label=f"即時最新收盤價 ({latest_date_str})",
-                            value=f"${curr_price:,.2f}",
-                            delta=f"{price_diff:+.2f} ({price_pct:+.2f}%)"
-                        )
-                    with p_col2:
-                        st.caption(f"⏱️ 系統數據最後計算更新時間：`{now_str}`")
-                        st.caption(f"📡 行情數據來源：`{src_bt}`")
-
-                    st.markdown("---")
-                    st.markdown("#### 💡 當前最新策略操作建議與動態提醒")
-                    
-                    act_text = latest['Advice_Action']
-                    rsn_text = latest['Advice_Reason']
-                    
-                    if "100%清倉" in act_text or "離場" in act_text or "砍倉" in act_text:
-                        st.error(f"**【操作建議】{act_text}** — {rsn_text}")
-                    elif "被禁用" in act_text or "否決" in act_text or "減倉" in act_text or "警惕" in act_text:
-                        st.warning(f"**【操作建議】{act_text}** — {rsn_text}")
-                    elif "模式" in act_text or "建倉" in act_text or "補滿倉" in act_text or "續抱" in act_text:
-                        st.success(f"**【操作建議】{act_text}** — {rsn_text}")
+                    if df_sub.empty:
+                        st.warning("選定日期區間內沒有可用的交易日行情數據。")
                     else:
-                        st.info(f"**【操作建議】{act_text}** — {rsn_text}")
+                        latest = df_sub.iloc[-1]
+                        latest_date_str = df_sub.index[-1].strftime("%Y-%m-%d")
+                        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-                    st.markdown("---")
-                    st.markdown("#### 📊 最新市場指標總覽")
-                    
-                    m1, m2, m3, m4, m5, m6 = st.columns([1.2, 1.3, 1.2, 1.2, 1.1, 1.1])
-                    
-                    temp_val = latest['Temperature']
-                    m1.metric("市場動態溫度 T", f"{temp_val:.1f}°C")
+                        curr_price = latest['Close']
+                        prev_p = df_calc.iloc[df_calc.index.get_loc(df_sub.index[-1]) - 1]['Close'] if len(df_calc) > len(df_sub) else latest['Open']
+                        price_diff = curr_price - prev_p
+                        price_pct = (price_diff / prev_p) * 100.0 if prev_p > 0 else 0.0
 
-                    close_p = latest['Close']
-                    bb_u = latest['BB_Upper']
-                    bb_m = latest['MA20']
-                    bb_l = latest['BB_Lower']
-                    
-                    if close_p >= bb_u:
-                        bb_pos_str = "觸及/上破上軌 🔥"
-                    elif close_p <= bb_l:
-                        bb_pos_str = "觸及/下破下軌 🥶"
-                    elif close_p > bb_m:
-                        bb_pos_str = "中軌與上軌之間 📈"
-                    else:
-                        bb_pos_str = "中軌與下軌之間 📉"
-                    m2.metric("布林通道位置", bb_pos_str)
+                        st.markdown("---")
+                        p_col1, p_col2 = st.columns([2, 4])
+                        with p_col1:
+                            st.metric(
+                                label=f"即時最新收盤價 ({latest_date_str})",
+                                value=f"${curr_price:,.2f}",
+                                delta=f"{price_diff:+.2f} ({price_pct:+.2f}%)"
+                            )
+                        with p_col2:
+                            st.caption(f"⏱️ 系統數據最後計算更新時間：`{now_str}`")
+                            st.caption(f"📡 行情數據來源：`{src_bt}`")
 
-                    rsi_now = latest['RSI14']
-                    rsi_diff_2 = latest['RSI_Diff_2D']
-                    rsi_diff_5 = latest['RSI_Diff_5D']
-                    diff_2_str = f"{'▲' if rsi_diff_2 >= 0 else '▼'}{abs(rsi_diff_2):.2f}" if not np.isnan(rsi_diff_2) else "N/A"
-                    diff_5_str = f"{'▲' if rsi_diff_5 >= 0 else '▼'}{abs(rsi_diff_5):.2f}" if not np.isnan(rsi_diff_5) else "N/A"
-                    m3.metric("RSI(14) 當前值", f"{rsi_now:.2f}", f"2日:{diff_2_str} | 5日:{diff_5_str}")
+                        st.markdown("---")
+                        st.markdown("#### 💡 當前最新策略操作建議與動態提醒")
+                        
+                        act_text = latest['Advice_Action']
+                        rsn_text = latest['Advice_Reason']
+                        
+                        if "100%清倉" in act_text or "離場" in act_text or "砍倉" in act_text:
+                            st.error(f"**【操作建議】{act_text}** — {rsn_text}")
+                        elif "被禁用" in act_text or "否決" in act_text or "減倉" in act_text or "警惕" in act_text:
+                            st.warning(f"**【操作建議】{act_text}** — {rsn_text}")
+                        elif "模式" in act_text or "建倉" in act_text or "補滿倉" in act_text or "續抱" in act_text:
+                            st.success(f"**【操作建議】{act_text}** — {rsn_text}")
+                        else:
+                            st.info(f"**【操作建議】{act_text}** — {rsn_text}")
 
-                    dif_val = latest['DIF']
-                    macd_tag = "0軸上方 (強勢)" if dif_val > 0 else "0軸下方 (弱勢)"
-                    m4.metric("MACD 快線 (DIF)", f"{dif_val:.2f}", macd_tag)
+                        st.markdown("---")
+                        st.markdown("#### 📊 最新市場指標總覽")
+                        
+                        m1, m2, m3, m4, m5, m6 = st.columns([1.2, 1.3, 1.2, 1.2, 1.1, 1.1])
+                        
+                        temp_val = latest['Temperature']
+                        m1.metric("市場動態溫度 T", f"{temp_val:.1f}°C")
 
-                    b5_tag = "看多 🟢" if latest['Bull_5D'] else ("看空 🔴" if latest['Bear_5D'] else "震盪 🟡")
-                    m5.metric("5日短期格局", b5_tag)
+                        close_p = latest['Close']
+                        bb_u = latest['BB_Upper']
+                        bb_m = latest['MA20']
+                        bb_l = latest['BB_Lower']
+                        
+                        if close_p >= bb_u:
+                            bb_pos_str = "觸及/上破上軌 🔥"
+                        elif close_p <= bb_l:
+                            bb_pos_str = "觸及/下破下軌 🥶"
+                        elif close_p > bb_m:
+                            bb_pos_str = "中軌與上軌之間 📈"
+                        else:
+                            bb_pos_str = "中軌與下軌之間 📉"
+                        m2.metric("布林通道位置", bb_pos_str)
 
-                    b20_tag = "看多 🟢" if latest['Bull_20D'] else ("看空 🔴" if latest['Bear_20D'] else "震盪 🟡")
-                    m6.metric("20日中期格局", b20_tag)
+                        rsi_now = latest['RSI14']
+                        rsi_diff_2 = latest['RSI_Diff_2D']
+                        rsi_diff_5 = latest['RSI_Diff_5D']
+                        diff_2_str = f"{'▲' if rsi_diff_2 >= 0 else '▼'}{abs(rsi_diff_2):.2f}" if not np.isnan(rsi_diff_2) else "N/A"
+                        diff_5_str = f"{'▲' if rsi_diff_5 >= 0 else '▼'}{abs(rsi_diff_5):.2f}" if not np.isnan(rsi_diff_5) else "N/A"
+                        m3.metric("RSI(14) 當前值", f"{rsi_now:.2f}", f"2日:{diff_2_str} | 5日:{diff_5_str}")
 
-                    st.markdown("---")
-                    st.markdown("#### 🔍 多空格局技術面原因解析")
-                    c_rs1, c_rs2 = st.columns(2)
-                    with c_rs1:
-                        st.info(f"**📌 5日短期格局原因：** {latest['Reason_5D']}")
-                    with c_rs2:
-                        st.info(f"**📌 20日中期格局原因：** {latest['Reason_20D']}")
+                        dif_val = latest['DIF']
+                        macd_tag = "0軸上方 (強勢)" if dif_val > 0 else "0軸下方 (弱勢)"
+                        m4.metric("MACD 快線 (DIF)", f"{dif_val:.2f}", macd_tag)
 
-                    st.markdown("---")
-                    st.markdown("#### 🎯 K線(含均線MA5/10/20/60與布林通道)、市場溫度、RSI 與 MACD 四圖對照")
+                        b5_tag = "看多 🟢" if latest['Bull_5D'] else ("看空 🔴" if latest['Bear_5D'] else "震盪 🟡")
+                        m5.metric("5日短期格局", b5_tag)
 
-                    fig = make_subplots(
-                        rows=4, cols=1, 
-                        shared_xaxes=True, 
-                        vertical_spacing=0.03, 
-                        row_heights=[0.4, 0.2, 0.2, 0.2],
-                        subplot_titles=(
-                            f"{bt_symbol} K線、MA5/10/20/60 均線與布林通道", 
-                            "動態市場溫度 T (0-100)", 
-                            "RSI(14) 指標", 
-                            "MACD 指標 (DIF, DEA, 柱狀圖)"
+                        b20_tag = "看多 🟢" if latest['Bull_20D'] else ("看空 🔴" if latest['Bear_20D'] else "震盪 🟡")
+                        m6.metric("20日中期格局", b20_tag)
+
+                        st.markdown("---")
+                        st.markdown("#### 🔍 多空格局技術面原因解析")
+                        c_rs1, c_rs2 = st.columns(2)
+                        with c_rs1:
+                            st.info(f"**📌 5日短期格局原因：** {latest['Reason_5D']}")
+                        with c_rs2:
+                            st.info(f"**📌 20日中期格局原因：** {latest['Reason_20D']}")
+
+                        st.markdown("---")
+                        st.markdown("#### 🎯 K線(含均線MA5/10/20/60與布林通道)、市場溫度、RSI 與 MACD 四圖對照")
+
+                        fig = make_subplots(
+                            rows=4, cols=1, 
+                            shared_xaxes=True, 
+                            vertical_spacing=0.03, 
+                            row_heights=[0.4, 0.2, 0.2, 0.2],
+                            subplot_titles=(
+                                f"{bt_symbol} K線、MA5/10/20/60 均線與布林通道", 
+                                "動態市場溫度 T (0-100)", 
+                                "RSI(14) 指標", 
+                                "MACD 指標 (DIF, DEA, 柱狀圖)"
+                            )
                         )
-                    )
 
-                    fig.add_trace(go.Candlestick(
-                        x=df_sub.index,
-                        open=df_sub['Open'], high=df_sub['High'],
-                        low=df_sub['Low'], close=df_sub['Close'],
-                        name='K線',
-                        increasing_line_color='#26a69a', decreasing_line_color='#ef5350'
-                    ), row=1, col=1)
+                        fig.add_trace(go.Candlestick(
+                            x=df_sub.index,
+                            open=df_sub['Open'], high=df_sub['High'],
+                            low=df_sub['Low'], close=df_sub['Close'],
+                            name='K線',
+                            increasing_line_color='#26a69a', decreasing_line_color='#ef5350'
+                        ), row=1, col=1)
 
-                    fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['MA5'], mode='lines', name='MA5', line=dict(color='#FF9800', width=1.2)), row=1, col=1)
-                    fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['MA10'], mode='lines', name='MA10', line=dict(color='#00BCD4', width=1.2)), row=1, col=1)
-                    fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['MA20'], mode='lines', name='MA20(布林中軌)', line=dict(color='#2196F3', width=1.5)), row=1, col=1)
-                    fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['MA60'], mode='lines', name='MA60(季線)', line=dict(color='#78909C', width=1.5)), row=1, col=1)
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['MA5'], mode='lines', name='MA5', line=dict(color='#FF9800', width=1.2)), row=1, col=1)
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['MA10'], mode='lines', name='MA10', line=dict(color='#00BCD4', width=1.2)), row=1, col=1)
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['MA20'], mode='lines', name='MA20(布林中軌)', line=dict(color='#2196F3', width=1.5)), row=1, col=1)
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['MA60'], mode='lines', name='MA60(季線)', line=dict(color='#78909C', width=1.5)), row=1, col=1)
 
-                    fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['BB_Upper'], mode='lines', name='布林上軌', line=dict(color='#AB47BC', width=1, dash='dash')), row=1, col=1)
-                    fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['BB_Lower'], mode='lines', name='布林下軌', line=dict(color='#AB47BC', width=1, dash='dash')), row=1, col=1)
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['BB_Upper'], mode='lines', name='布林上軌', line=dict(color='#AB47BC', width=1, dash='dash')), row=1, col=1)
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['BB_Lower'], mode='lines', name='布林下軌', line=dict(color='#AB47BC', width=1, dash='dash')), row=1, col=1)
 
-                    fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Temperature'], mode='lines', name='溫度 T', line=dict(color='#FF3D00', width=2)), row=2, col=1)
-                    fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Temperature_MA10'], mode='lines', name='溫度 T 10日均線', line=dict(color='#FFA726', width=1, dash='dot')), row=2, col=1)
-                    fig.add_hline(y=80, line_dash="dash", line_color="#FF1744", row=2, col=1)
-                    fig.add_hline(y=35, line_dash="dash", line_color="#00E676", row=2, col=1)
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Temperature'], mode='lines', name='溫度 T', line=dict(color='#FF3D00', width=2)), row=2, col=1)
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Temperature_MA10'], mode='lines', name='溫度 T 10日均線', line=dict(color='#FFA726', width=1, dash='dot')), row=2, col=1)
+                        fig.add_hline(y=80, line_dash="dash", line_color="#FF1744", row=2, col=1)
+                        fig.add_hline(y=35, line_dash="dash", line_color="#00E676", row=2, col=1)
 
-                    fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['RSI14'], mode='lines', name='RSI(14)', line=dict(color='#00E5FF', width=1.5)), row=3, col=1)
-                    fig.add_hline(y=70, line_dash="dot", line_color="#FF8A80", row=3, col=1)
-                    fig.add_hline(y=50, line_dash="dash", line_color="#CCCCCC", row=3, col=1)
-                    fig.add_hline(y=30, line_dash="dot", line_color="#B9F6CA", row=3, col=1)
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['RSI14'], mode='lines', name='RSI(14)', line=dict(color='#00E5FF', width=1.5)), row=3, col=1)
+                        fig.add_hline(y=70, line_dash="dot", line_color="#FF8A80", row=3, col=1)
+                        fig.add_hline(y=50, line_dash="dash", line_color="#CCCCCC", row=3, col=1)
+                        fig.add_hline(y=30, line_dash="dot", line_color="#B9F6CA", row=3, col=1)
 
-                    fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['DIF'], mode='lines', name='DIF (快線)', line=dict(color='#2962FF', width=1.2)), row=4, col=1)
-                    fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['DEA'], mode='lines', name='DEA (慢線)', line=dict(color='#FF6D00', width=1.2)), row=4, col=1)
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['DIF'], mode='lines', name='DIF (快線)', line=dict(color='#2962FF', width=1.2)), row=4, col=1)
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['DEA'], mode='lines', name='DEA (慢線)', line=dict(color='#FF6D00', width=1.2)), row=4, col=1)
+                        
+                        macd_colors = ['#26a69a' if h >= 0 else '#ef5350' for h in df_sub['MACD_Hist']]
+                        fig.add_trace(go.Bar(x=df_sub.index, y=df_sub['MACD_Hist'], name='MACD 柱狀圖', marker_color=macd_colors), row=4, col=1)
+                        fig.add_hline(y=0, line_dash="solid", line_color="#9E9E9E", row=4, col=1)
+
+                        fig.update_layout(
+                            xaxis_rangeslider_visible=False,
+                            hovermode="x unified",
+                            template="plotly_white",
+                            height=850
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+
+                        st.markdown("---")
+                        st.markdown("#### 📜 每日技術指標、多空原因與策略建議明細")
+                        
+                        show_df = df_sub.copy()
+                        show_df['市場溫度 T'] = show_df['Temperature'].round(1)
+                        show_df['RSI(14)'] = show_df['RSI14'].round(2)
+                        show_df['MACD柱狀'] = show_df['MACD_Hist'].round(3)
+                        
+                        show_cols = ["Open", "High", "Low", "Close", "Volume", "市場溫度 T", "RSI(14)", "Reason_5D", "Reason_20D", "Advice_Action", "Advice_Reason"]
+                        rename_dict = {
+                            "Reason_5D": "5日格局原因",
+                            "Reason_20D": "20日格局原因",
+                            "Advice_Action": "操作建議",
+                            "Advice_Reason": "策略分析原因"
+                        }
+                        
+                        display_df = show_df[show_cols].rename(columns=rename_dict).sort_index(ascending=False)
+                        st.dataframe(display_df, use_container_width=True)
+
+            except Exception as ex:
+                st.error(f"載入數據失敗: {ex}")
+
+# ----------------------------------------------------
+# ⚡ 頁籤二：自選清單一鍵全掃瞄
+# ----------------------------------------------------
+with tab2:
+    st.markdown("### ⚡ 自選個股一鍵全掃瞄與多週期報酬檢視")
+    st.write("點擊下方按鈕，系統將自動分析自選清單中所有股票，並呈現當日建議、基本指標與多週期漲跌幅。")
+
+    col_scan1, col_scan2 = st.columns([3, 3])
+    with col_scan1:
+        scan_target_date = st.date_input("選擇掃瞄基準日期", value=datetime.now(), key="scan_target_date")
+    
+    if st.button("🔍 開始一鍵全清單掃瞄", type="primary", key="btn_scan_all"):
+        if not stock_keys:
+            st.warning("目前自選清單中沒有標的，請先在左側邊欄新增股票。")
+        else:
+            scan_results = []
+            target_date_str = scan_target_date.strftime("%Y-%m-%d")
+            
+            # 為了計算長週期漲跌幅（一年為 240 個交易日），向前抓取約 400 天歷史數據
+            fetch_start_date = (scan_target_date - timedelta(days=450)).strftime("%Y-%m-%d")
+            
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+
+            for idx, sym in enumerate(stock_keys):
+                stock_name = db["stocks"][sym].get("name", sym)
+                status_text.text(f"⏳ 正在掃瞄 [{idx+1}/{len(stock_keys)}]: {sym} ({stock_name})...")
+                
+                try:
+                    df_raw, _ = cached_fetch_ohlc(sym, start_date=fetch_start_date, end_date=target_date_str)
                     
-                    macd_colors = ['#26a69a' if h >= 0 else '#ef5350' for h in df_sub['MACD_Hist']]
-                    fig.add_trace(go.Bar(x=df_sub.index, y=df_sub['MACD_Hist'], name='MACD 柱狀圖', marker_color=macd_colors), row=4, col=1)
-                    fig.add_hline(y=0, line_dash="solid", line_color="#9E9E9E", row=4, col=1)
+                    if not df_raw.empty and len(df_raw) >= 20:
+                        df_calc = TechnicalAnalysisEngine.calculate_indicators(df_raw, display_start_date=fetch_start_date)
+                        
+                        # 取得最新截至基準日期的數據記錄
+                        latest_idx = df_calc.index.get_loc(df_calc.index[-1])
+                        latest = df_calc.iloc[latest_idx]
+                        
+                        curr_close = latest['Close']
+                        
+                        # 計算各週期漲跌幅
+                        # 日漲幅 (1D)
+                        prev_1d_close = df_calc['Close'].iloc[latest_idx - 1] if latest_idx >= 1 else np.nan
+                        ret_1d = ((curr_close - prev_1d_close) / prev_1d_close * 100.0) if not np.isnan(prev_1d_close) else 0.0
 
-                    fig.update_layout(
-                        xaxis_rangeslider_visible=False,
-                        hovermode="x unified",
-                        template="plotly_white",
-                        height=850
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
+                        # 月漲幅 (20個交易日)
+                        prev_1m_close = df_calc['Close'].iloc[latest_idx - 20] if latest_idx >= 20 else np.nan
+                        ret_1m = ((curr_close - prev_1m_close) / prev_1m_close * 100.0) if not np.isnan(prev_1m_close) else np.nan
 
-                    st.markdown("---")
-                    st.markdown("#### 📜 每日技術指標、多空原因與策略建議明細")
-                    
-                    show_df = df_sub.copy()
-                    show_df['市場溫度 T'] = show_df['Temperature'].round(1)
-                    show_df['RSI(14)'] = show_df['RSI14'].round(2)
-                    show_df['MACD柱狀'] = show_df['MACD_Hist'].round(3)
-                    
-                    show_cols = ["Open", "High", "Low", "Close", "Volume", "市場溫度 T", "RSI(14)", "Reason_5D", "Reason_20D", "Advice_Action", "Advice_Reason"]
-                    rename_dict = {
-                        "Reason_5D": "5日格局原因",
-                        "Reason_20D": "20日格局原因",
-                        "Advice_Action": "操作建議",
-                        "Advice_Reason": "策略分析原因"
-                    }
-                    
-                    display_df = show_df[show_cols].rename(columns=rename_dict).sort_index(ascending=False)
-                    st.dataframe(display_df, use_container_width=True)
+                        # 季漲幅 (60個交易日)
+                        prev_3m_close = df_calc['Close'].iloc[latest_idx - 60] if latest_idx >= 60 else np.nan
+                        ret_3m = ((curr_close - prev_3m_close) / prev_3m_close * 100.0) if not np.isnan(prev_3m_close) else np.nan
 
-        except Exception as ex:
-            st.error(f"載入數據失敗: {ex}")
+                        # 年漲幅 (240個交易日)
+                        prev_1y_close = df_calc['Close'].iloc[latest_idx - 240] if latest_idx >= 240 else np.nan
+                        ret_1y = ((curr_close - prev_1y_close) / prev_1y_close * 100.0) if not np.isnan(prev_1y_close) else np.nan
+
+                        scan_results.append({
+                            "股票代碼": sym,
+                            "股票名稱": stock_name,
+                            "資料日期": df_calc.index[-1].strftime("%Y-%m-%d"),
+                            "最新收盤價": f"${curr_close:,.2f}",
+                            "當日漲幅": f"{ret_1d:+.2f}%",
+                            "近1個月漲幅": f"{ret_1m:+.2f}%" if not np.isnan(ret_1m) else "N/A",
+                            "近3個月漲幅": f"{ret_3m:+.2f}%" if not np.isnan(ret_3m) else "N/A",
+                            "近1年漲幅": f"{ret_1y:+.2f}%" if not np.isnan(ret_1y) else "N/A",
+                            "市場溫度 T": round(latest['Temperature'], 1),
+                            "RSI(14)": round(latest['RSI14'], 2),
+                            "MACD DIF": round(latest['DIF'], 2),
+                            "當天操作建議": latest['Advice_Action'],
+                            "策略原因說明": latest['Advice_Reason']
+                        })
+                    else:
+                        scan_results.append({
+                            "股票代碼": sym, "股票名稱": stock_name, "資料日期": "N/A",
+                            "最新收盤價": "N/A", "當日漲幅": "N/A", "近1個月漲幅": "N/A",
+                            "近3個月漲幅": "N/A", "近1年漲幅": "N/A", "市場溫度 T": "N/A",
+                            "RSI(14)": "N/A", "MACD DIF": "N/A",
+                            "當天操作建議": "⚠️ 數據不足", "策略原因說明": "無足夠歷史 K 線資料進行計算"
+                        })
+                except Exception as ex:
+                    scan_results.append({
+                        "股票代碼": sym, "股票名稱": stock_name, "資料日期": "N/A",
+                        "最新收盤價": "N/A", "當日漲幅": "N/A", "近1個月漲幅": "N/A",
+                        "近3個月漲幅": "N/A", "近1年漲幅": "N/A", "市場溫度 T": "N/A",
+                        "RSI(14)": "N/A", "MACD DIF": "N/A",
+                        "當天操作建議": "❌ 抓取失敗", "策略原因說明": str(ex)
+                    })
+                
+                progress_bar.progress((idx + 1) / len(stock_keys))
+
+            status_text.text("✅ 全清單掃瞄完成！")
+            progress_bar.empty()
+
+            res_df = pd.DataFrame(scan_results)
+            
+            st.markdown("---")
+            st.markdown("#### 📋 掃瞄結果彙整總表")
+            st.dataframe(res_df, use_container_width=True)
