@@ -384,7 +384,7 @@ class TechnicalAnalysisEngine:
         df['Reason_5D'] = trend_reason_5d
         df['Reason_20D'] = trend_reason_20d
 
-        # 🛠️ 策略引擎：更新三合一嚴格離場條件
+        # 🛠️ 策略引擎：精簡持倉維護（移除順勢拉回加碼）
         action_list = []
         reason_list = []
 
@@ -463,12 +463,9 @@ class TechnicalAnalysisEngine:
                 last_buy_index = i
                 position_ratio = 1.0
 
-            # 📈 4. 持倉期間的動態維護
+            # 📈 4. 持倉期間的動態維護（已移除順勢拉回加碼）
             elif in_position:
-                if (dif > 0) and (rsi > 50) and (abs(df['Low'].iloc[i] - bb_m) / bb_m <= 0.015) and above_ma20 and (i - last_buy_index > 3):
-                    act = "📈 順勢拉回(加碼)"
-                    rsn = "持倉中，股價拉回測試布林中軌(MA20)獲支撐，可分批加碼"
-                elif (high_p >= bb_u) and (rsi >= 70) and (hist > 0):
+                if (high_p >= bb_u) and (rsi >= 70) and (hist > 0):
                     act = "🔥 強勢軌道游走"
                     rsn = f"持倉中({int(position_ratio*100)}%)，股價沿布林上軌強勢游走，主升段續抱"
                 else:
@@ -695,7 +692,7 @@ if st.button("🚀 載入 K 線與三指標組合分析", type="primary"):
                         st.error(f"**【操作建議】{act_text}** — {rsn_text}")
                     elif "減碼" in act_text or "假突破" in act_text or "警惕" in act_text:
                         st.warning(f"**【操作建議】{act_text}** — {rsn_text}")
-                    elif "趨勢" in act_text or "建倉" in act_text or "建半倉" in act_text or "補滿倉" in act_text or "加碼" in act_text or "續抱" in act_text:
+                    elif "趨勢" in act_text or "建倉" in act_text or "建半倉" in act_text or "補滿倉" in act_text or "續抱" in act_text:
                         st.success(f"**【操作建議】{act_text}** — {rsn_text}")
                     else:
                         st.info(f"**【操作建議】{act_text}** — {rsn_text}")
