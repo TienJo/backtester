@@ -265,7 +265,7 @@ def cached_fetch_ohlc(symbol: str, start_date: str = None, end_date: str = None)
 # ==========================================
 class TechnicalAnalysisEngine:
     @staticmethod
-    def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    def calculate_indicators(df: pd.DataFrame, display_start_date: str = None) -> pd.DataFrame:
         df = df.copy()
         
         # 1. 均線與布林通道計算
@@ -384,15 +384,24 @@ class TechnicalAnalysisEngine:
         df['Reason_5D'] = trend_reason_5d
         df['Reason_20D'] = trend_reason_20d
 
-        # 🛠️ 策略引擎：更新複合離場條件（加入近5日溫度>80）
+        # 🛠️ 策略引擎：修正持倉狀態傳遞邏輯
         action_list = []
         reason_list = []
+
+        sub_start_dt = pd.to_datetime(display_start_date) if display_start_date else df.index[0]
 
         last_buy_index = -999  # 上次建倉索引
         in_position = False    # 目前持倉狀態
         position_ratio = 0.0   # 0.0: 無持倉, 0.5: 半倉, 1.0: 滿倉
 
         for i in range(len(df)):
+            current_date = df.index[i]
+
+            # 🎯 區間點重置：若進入顯示區間第一天，強制將狀態重置為空倉
+            if current_date >= sub_start_dt and last_buy_index < 0:
+                in_position = False
+                position_ratio = 0.0
+
             if i < 20:
                 action_list.append("資料載入中")
                 reason_list.append("計算指標所需日數不足")
@@ -417,16 +426,12 @@ class TechnicalAnalysisEngine:
             hist = df['MACD_Hist'].iloc[i]
 
             # 🎯 離場條件解析：
-            # 1. 當天 MACD 死叉
             macd_dc = (dif < dea) and (prev_dif >= prev_dea)
-            # 2. 現價高於 MA20 不到 2% (即 Close < MA20 * 1.02)
             price_near_or_below_ma20 = close_p < (bb_m * 1.02)
-            # 3. MA20 趨勢向下 或 近5日內有一天的市場溫度 > 80度
             ma20_downtrend = ma20_diff1 < 0
             temp_over_80_in_5d = (df['Temperature'].iloc[max(0, i-4):i+1] > 80.0).any()
             condition_3_met = ma20_downtrend or temp_over_80_in_5d
 
-            # 三條件按順序完全滿足時觸發離場
             strict_exit_triggered = macd_dc and price_near_or_below_ma20 and condition_3_met
 
             # 🎯【唯一建倉條件】：近 5 日內 RSI 曾低於 30，且當日 RSI 單日強彈 >= 8 點
@@ -443,8 +448,8 @@ class TechnicalAnalysisEngine:
             act = "觀望待變"
             rsn = "三指標處於常態區域，未達 RSI<30 且強彈 >=8 點之唯一建倉門檻"
 
-            # 🛑 1. 複合條件嚴格離場 (最高優先級)
-            if strict_exit_triggered:
+            # 🛑 1. 複合條件嚴格離場 (最高優先級，僅在持倉時生效)
+            if strict_exit_triggered and in_position:
                 c3_desc = "MA20趨勢向下" if ma20_downtrend else "近5日內市場溫度曾超過80°C"
                 if ma20_downtrend and temp_over_80_in_5d:
                     c3_desc = "MA20趨勢向下且近5日溫度曾超過80°C"
@@ -661,7 +666,7 @@ if st.button("🚀 載入 K 線與三指標組合分析", type="primary"):
             if df_raw.empty or len(df_raw) < 10:
                 st.error("歷史數據不足，無法繪製K線圖。請確認代碼或重新選擇區間。")
             else:
-                df_calc = TechnicalAnalysisEngine.calculate_indicators(df_raw)
+                df_calc = TechnicalAnalysisEngine.calculate_indicators(df_raw, display_start_date=start_str)
                 df_sub = df_calc.loc[start_str:end_str]
 
                 if df_sub.empty:
