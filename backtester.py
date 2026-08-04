@@ -514,7 +514,6 @@ class TechnicalAnalysisEngine:
             # ----------------------------------------------------
             macd_dc = (dif < dea) and (prev_dif >= prev_dea)
             macd_dc_and_below_ma20 = macd_dc and (close_p < m20)
-            macd_dc_above_ma20 = macd_dc and (close_p >= m20)
 
             # 🚨【修復方案三：模式 B 建倉失敗即刻砍倉（3 日認錯規則）】
             days_since_mode_b = i - mode_b_entry_index
@@ -548,12 +547,6 @@ class TechnicalAnalysisEngine:
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
-
-            # ⚠️ 3. MACD 死叉但仍高於 MA20 (洗盤死叉，減倉至半倉)
-            elif macd_dc_above_ma20 and in_position and (position_ratio > 0.5):
-                act = "⚠️ 高點MACD死叉(減倉至半倉)"
-                rsn = f"MACD出現高點死叉，但價格守穩MA20({m20:.2f})之上，判定為多頭洗盤，減倉至半倉續抱"
-                position_ratio = 0.5
 
             # 🟢 4.【模式 A 建半倉】（獨立運行，不受模式 B 濾網限制）
             elif not in_position and not cd_active and mode_a_buy:
