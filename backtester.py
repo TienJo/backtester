@@ -274,16 +274,14 @@ class TechnicalAnalysisEngine:
         df['MA20'] = df['Close'].rolling(20).mean()
         df['MA60'] = df['Close'].rolling(60).mean()
 
-        # 布林中軌（MA20）之單日差值（趨勢方向）
-        df['MA20_Diff'] = df['MA20'].diff(1)
-
         std20 = df['Close'].rolling(20).std()
         df['BB_Upper'] = df['MA20'] + (2.0 * std20)
         df['BB_Lower'] = df['MA20'] - (2.0 * std20)
         df['BB_Bandwidth'] = (df['BB_Upper'] - df['BB_Lower']) / df['MA20']
         
-        # 布林上軌 5 日趨勢
+        # 計算布林上軌與 MA20 變化量
         df['BB_Upper_5D_Diff'] = df['BB_Upper'].diff(5)
+        df['MA20_Diff_1D'] = df['MA20'].diff(1)
 
         # 2. 量能與量比
         df['Vol_MA5'] = df['Volume'].rolling(5).mean()
@@ -386,7 +384,7 @@ class TechnicalAnalysisEngine:
         df['Reason_5D'] = trend_reason_5d
         df['Reason_20D'] = trend_reason_20d
 
-        # 🛠️ 策略引擎：複合離場條件 (死叉 + 低高於MA20 2% + 布林中軌向下 + 前10日過熱)
+        # 🛠️ 策略引擎：更新三合一嚴格離場條件
         action_list = []
         reason_list = []
 
@@ -405,8 +403,8 @@ class TechnicalAnalysisEngine:
 
             bb_u = df['BB_Upper'].iloc[i]
             bb_m = df['MA20'].iloc[i]
-            ma20_diff = df['MA20_Diff'].iloc[i]
             bb_u_diff5 = df['BB_Upper_5D_Diff'].iloc[i]
+            ma20_diff1 = df['MA20_Diff_1D'].iloc[i]
             bw = df['BB_Bandwidth'].iloc[i]
 
             rsi = df['RSI14'].iloc[i]
@@ -417,22 +415,17 @@ class TechnicalAnalysisEngine:
             prev_dif = df['DIF'].iloc[i-1]
             prev_dea = df['DEA'].iloc[i-1]
             hist = df['MACD_Hist'].iloc[i]
-            prev_hist = df['MACD_Hist'].iloc[i-1]
 
-            # 🎯 條件 A: 當天 MACD 出現死叉
+            # 🎯 離場條件解析：
+            # 1. 當天 MACD 死叉
             macd_dc = (dif < dea) and (prev_dif >= prev_dea)
+            # 2. 現價高於 MA20 不到 2% (即 Close < MA20 * 1.02)
+            price_near_or_below_ma20 = close_p < (bb_m * 1.02)
+            # 3. MA20 趨勢向下 (MA20_Diff_1D < 0)
+            ma20_downtrend = ma20_diff1 < 0
 
-            # 🎯 條件 B: 現價高於 MA20 不到 2% (相當於 close_p <= bb_m * 1.02)
-            near_or_below_ma20 = close_p <= (bb_m * 1.02)
-
-            # 🎯 條件 C: 布林中軌趨勢向下
-            ma20_downtrend = ma20_diff < 0
-
-            # 🎯 條件 D: 前 10 日市場溫度曾超過 80 度
-            temp_over_80_in_10d = (df['Temperature'].iloc[max(0, i-10):i] > 80.0).any()
-
-            # 🛑 綜合離場觸發判定
-            strict_exit_triggered = macd_dc and near_or_below_ma20 and ma20_downtrend and temp_over_80_in_10d
+            # 三條件完全滿足時觸發離場
+            strict_exit_triggered = macd_dc and price_near_or_below_ma20 and ma20_downtrend
 
             # 🎯【唯一建倉條件】：近 5 日內 RSI 曾低於 30，且當日 RSI 單日強彈 >= 8 點
             rsi_recent_oversold = (df['RSI14'].iloc[max(0, i-5):i+1] < 30.0).any()
@@ -442,34 +435,20 @@ class TechnicalAnalysisEngine:
             above_ma20 = close_p >= bb_m
             bb_upper_uptrend_5d = bb_u_diff5 > 0
 
-            # 頂背離判定
-            price_10d_high = close_p > df['Close'].iloc[i-10:i].max()
-            rsi_is_high = rsi >= 65.0
-            rsi_lower_than_peak = rsi < df['RSI14'].iloc[i-10:i].max()
-            macd_hist_shrink = hist < prev_hist
-            bear_divergence = price_10d_high and rsi_is_high and rsi_lower_than_peak and macd_hist_shrink
-
             # 冷卻期判斷
             cd_active = (i - last_buy_index) < 5
 
             act = "觀望待變"
-            rsn = "三指標處於常態區域，未達建倉或複合離場門檻"
+            rsn = "三指標處於常態區域，未達 RSI<30 且強彈 >=8 點之唯一建倉門檻"
 
-            # 🛑 1. 複合離場條件 —— 無條件清倉離場 (最高優先級)
+            # 🛑 1. 複合條件嚴格離場 (最高優先級)
             if strict_exit_triggered:
-                act = "🛑 滿足複合條件(無條件清倉)"
-                rsn = "MACD死叉 + 現價低於MA20+2% + 中軌下彎 + 前10日溫度暴增>80，反轉確立無條件清倉"
+                act = "🛑 複合條件滿足(全數清倉)"
+                rsn = f"同時滿足：①MACD當日死叉 ②現價({close_p:.2f})高於MA20({bb_m:.2f})不足2% ③MA20趨勢向下，多頭結構破壞全數離場"
                 in_position = False
                 position_ratio = 0.0
 
-            # ⚠️ 2. 高檔頂背離 —— 提前停利離場
-            elif bear_divergence and (high_p >= bb_u * 0.995):
-                act = "⚠️ 背離獲利了結"
-                rsn = "價格高檔創新高但 RSI/MACD 出現頂背離，建議獲利離場"
-                in_position = False
-                position_ratio = 0.0
-
-            # 🟢 3.【唯一建半倉條件】：RSI 超賣 + 單日強彈 >= 8 點
+            # 🟢 2.【唯一建半倉條件】：RSI 超賣 + 單日強彈 >= 8 點
             elif not in_position and not cd_active and rsi_recent_oversold and rsi_surge_8:
                 act = "🟢 RSI強彈(建半倉)"
                 rsn = f"近5日曾進入超賣區(RSI<30)，今日RSI爆發大漲{rsi_diff_1:.1f}點(>=8)，買盤強勢介入，建議試單建半倉"
@@ -477,14 +456,14 @@ class TechnicalAnalysisEngine:
                 in_position = True
                 position_ratio = 0.5
 
-            # 🚀 4. 抄底第二步：站上 MA20 + 布林上軌5日走揚 —— 補滿倉 (加碼)
+            # 🚀 3. 抄底第二步：站上 MA20 + 布林上軌5日走揚 —— 補滿倉 (加碼)
             elif (position_ratio == 0.5) and above_ma20 and bb_upper_uptrend_5d:
                 act = "🚀 趨勢擴張(補滿倉)"
                 rsn = f"已有半倉，今日股價成功站上MA20({bb_m:.2f})且布林上軌5日持續走揚，波段多頭確立，建議補滿倉"
                 last_buy_index = i
                 position_ratio = 1.0
 
-            # 📈 5. 持倉期間的動態維護
+            # 📈 4. 持倉期間的動態維護
             elif in_position:
                 if (dif > 0) and (rsi > 50) and (abs(df['Low'].iloc[i] - bb_m) / bb_m <= 0.015) and above_ma20 and (i - last_buy_index > 3):
                     act = "📈 順勢拉回(加碼)"
@@ -494,9 +473,9 @@ class TechnicalAnalysisEngine:
                     rsn = f"持倉中({int(position_ratio*100)}%)，股價沿布林上軌強勢游走，主升段續抱"
                 else:
                     act = "✊ 續抱觀察"
-                    rsn = f"持倉中({int(position_ratio*100)}%)，行情沿趨勢運行，請繼續持股觀望"
+                    rsn = f"持倉中({int(position_ratio*100)}%)，未完全滿足離場條件，行情沿趨勢運行，請繼續持股"
 
-            # ⚠️ 6. 常態警示
+            # ⚠️ 5. 常態警示
             elif bw < 0.08:
                 act = "🟡 盤整變盤在即"
                 rsn = "布林極度收窄（縮口），變盤在即；靜待 RSI 超賣強彈建倉訊號"
@@ -712,7 +691,7 @@ if st.button("🚀 載入 K 線與三指標組合分析", type="primary"):
                     act_text = latest['Advice_Action']
                     rsn_text = latest['Advice_Reason']
                     
-                    if "停損" in act_text or "清倉" in act_text or "離場" in act_text:
+                    if "清倉" in act_text or "停損" in act_text or "死叉" in act_text or "離場" in act_text:
                         st.error(f"**【操作建議】{act_text}** — {rsn_text}")
                     elif "減碼" in act_text or "假突破" in act_text or "警惕" in act_text:
                         st.warning(f"**【操作建議】{act_text}** — {rsn_text}")
