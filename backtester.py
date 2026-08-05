@@ -297,14 +297,30 @@ class TechnicalAnalysisEngine:
         df['RSI_Diff_2D'] = df['RSI14'].diff(2)
         df['RSI_Diff_5D'] = df['RSI14'].diff(5)
 
-        # 4. MACD 計算
+        # 4. KD 指標計算 (9日 KD)
+        low_9 = df['Low'].rolling(9).min()
+        high_9 = df['High'].rolling(9).max()
+        rsv = np.where(high_9 != low_9, (df['Close'] - low_9) / (high_9 - low_9) * 100, 50)
+        
+        k_list, d_list = [50.0], [50.0]
+        for i in range(1, len(df)):
+            curr_rsv = rsv[i] if not np.isnan(rsv[i]) else 50.0
+            k_val = (2/3) * k_list[-1] + (1/3) * curr_rsv
+            d_val = (2/3) * d_list[-1] + (1/3) * k_val
+            k_list.append(k_val)
+            d_list.append(d_val)
+            
+        df['K'] = k_list
+        df['D'] = d_list
+
+        # 5. MACD 計算
         ema12 = df['Close'].ewm(span=12, adjust=False).mean()
         ema26 = df['Close'].ewm(span=26, adjust=False).mean()
         df['DIF'] = ema12 - ema26
         df['DEA'] = df['DIF'].ewm(span=9, adjust=False).mean()
         df['MACD_Hist'] = (df['DIF'] - df['DEA']) * 2
 
-        # 5. 市場溫度 T 計算
+        # 6. 市場溫度 T 計算
         df['Ret20'] = df['Close'].pct_change(20)
         df['Score_Rank20'] = df['Ret20'].rolling(60).apply(
             lambda x: (pd.Series(x).rank(pct=True).iloc[-1] * 100) if len(x) > 0 else 50, raw=False
@@ -420,11 +436,14 @@ class TechnicalAnalysisEngine:
             open_p = df['Open'].iloc[i]
             high_p = df['High'].iloc[i]
             low_p = df['Low'].iloc[i]
+            vol_p = df['Volume'].iloc[i]
 
             m5 = df['MA5'].iloc[i]
+            m10 = df['MA10'].iloc[i]
             m20 = df['MA20'].iloc[i]
             m60 = df['MA60'].iloc[i]
             m20_diff = df['MA20_Diff_1D'].iloc[i]
+            vol_ma5 = df['Vol_MA5'].iloc[i]
 
             bb_u = df['BB_Upper'].iloc[i]
             bb_u_diff5 = df['BB_Upper_5D_Diff'].iloc[i]
@@ -434,12 +453,18 @@ class TechnicalAnalysisEngine:
             prev_rsi = df['RSI14'].iloc[i-1]
             rsi_diff_1 = df['RSI_Diff_1D'].iloc[i]
 
+            k_val = df['K'].iloc[i]
+            d_val = df['D'].iloc[i]
+            prev_k = df['K'].iloc[i-1]
+            prev_d = df['D'].iloc[i-1]
+
             dif = df['DIF'].iloc[i]
             dea = df['DEA'].iloc[i]
             prev_dif = df['DIF'].iloc[i-1]
             prev_dea = df['DEA'].iloc[i-1]
             hist = df['MACD_Hist'].iloc[i]
             prev_hist = df['MACD_Hist'].iloc[i-1]
+            prev2_hist = df['MACD_Hist'].iloc[i-2] if i >= 2 else prev_hist
             
             temp_val = df['Temperature'].iloc[i]
             prev_temp_val = df['Temperature'].iloc[i-1]
@@ -481,7 +506,6 @@ class TechnicalAnalysisEngine:
             cond_b1_rsi = (40.0 <= prev_rsi <= 50.0) and (rsi_diff_1 > 0)
             touched_ma20_recent = (df['Low'].iloc[max(0, i-1):i+1] <= df['MA20'].iloc[max(0, i-1):i+1] * 1.015).any()
             
-            # MA20 必須明顯向上斜率、收盤價高於 MA20 至少 1%~2%（取 1.01）、當日低點高於昨日收盤價
             cond_b1_ma20_slope = m20_diff > 0
             cond_b1_price_ma20 = close_p >= (m20 * 1.01)
             prev_close_p = df['Close'].iloc[i-1]
@@ -503,19 +527,38 @@ class TechnicalAnalysisEngine:
             cond_b2_long_red = (close_p > open_p) and (close_p >= bb_u * 0.995)
             mode_b2_buy = cond_b2_ma_align and cond_b2_new_high and cond_b2_long_red
 
+            # ⚡ ---- 新增：B2 浪右側二次確認 (2浪回踩) 試單門檻 (B3) ----
+            support_hold = (low_p >= m20 * 0.985) or (low_p >= m60 * 0.985)
+            lowest_5d = df['Low'].iloc[max(0, i-5):i].min() if i >= 5 else low_p
+            higher_low = low_p >= lowest_5d  # 底比底高
+            
+            kd_gold_cross = (k_val > d_val) and (prev_k <= prev_d) and (k_val <= 65)
+            rsi_turn_up = (rsi > prev_rsi) and (rsi >= 38)
+            osc_stiff = (kd_gold_cross or rsi_turn_up)
+
+            # 即使 DIF < 0，只要柱狀體連續 2 天收縮 (負值變小) 即可觸發 2 浪回踩試單
+            macd_hist_improving_2d = (hist > prev_hist) and (prev_hist > prev2_hist)
+            mode_b3_wave2_buy = support_hold and higher_low and osc_stiff and macd_hist_improving_2d
+
+            # ⚡ ---- 新增：量能配合突破 (帶量突破 MA5/MA10) ----
+            vol_breakout = (vol_p >= vol_ma5 * 1.2) and (close_p > m5) and (close_p > m10) and (close_p > open_p)
+
+            # ⚡ ---- 新增：B2 滿倉時市場溫度銳減 > 18 度減半倉 ----
+            temp_drop_18 = (prev_temp_val - temp_val) > 18.0
+            b2_temp_drop_reduce = (position_ratio == 1.0) and temp_drop_18
+
             macd_dc = (dif < dea) and (prev_dif >= prev_dea)
             macd_dc_and_below_ma20 = macd_dc and (close_p < m20)
 
-            # 新增離場機制判定
+            # 離場機制判定
             is_near_20d_high = close_p >= (close_20d_max * 0.98)
             mode_b_exit_near_high = (entry_mode == "B") and is_near_20d_high and macd_dc and (close_p < m20) and (prev_temp_val > 80.0)
             
-            # B2 專屬離場機制：MACD > 0，但當日 MACD < 10 且比昨日減少了 >= 10
             b2_macd_exit = (entry_mode == "B2") and (dif > 0) and (hist < 10) and ((prev_hist - hist) >= 10)
 
             days_since_mode_b = i - mode_b_entry_index
             mode_b_3d_failed = False
-            if in_position and (entry_mode in ["B", "B1", "B2"]) and (1 <= days_since_mode_b <= 3):
+            if in_position and (entry_mode in ["B", "B1", "B2", "B3"]) and (1 <= days_since_mode_b <= 3):
                 if low_p < mode_b_entry_low:
                     mode_b_3d_failed = True
 
@@ -526,6 +569,7 @@ class TechnicalAnalysisEngine:
             act = "觀望待變"
             rsn = "指標未符合【模式A抄底】或【模式B主升浪順勢突破】之建倉門檻"
 
+            # 1. 強制清倉與停損規則
             if macd_dc_and_below_ma20 and in_position:
                 act = "🛑 MACD死叉+跌破MA20(100%清倉)"
                 rsn = f"MACD出現死叉且股價({close_p:.2f})跌破MA20({m20:.2f})，趨勢轉空，全數清倉避險"
@@ -554,6 +598,13 @@ class TechnicalAnalysisEngine:
                 position_ratio = 0.0
                 entry_mode = ""
 
+            # 2. ⚡ 滿倉時市場溫度銳減減半倉
+            elif b2_temp_drop_reduce:
+                act = "⚠️ 溫度銳減減半倉(降至50%)"
+                rsn = f"當日市場溫度T({temp_val:.1f}°C)較昨日({prev_temp_val:.1f}°C)銳減超過18°C，極速冷卻，倉位強制減至50%"
+                position_ratio = 0.5
+
+            # 3. 建倉與加倉邏輯
             elif not in_position and not cd_active and mode_a_buy:
                 act = "🟢 模式A:超賣強彈(建半倉)"
                 rsn = f"【模式A抄底】近5日內曾RSI<30，今日RSI暴漲{rsi_diff_1:.1f}點(>=8)，觸發抄底試單半倉"
@@ -561,6 +612,34 @@ class TechnicalAnalysisEngine:
                 in_position = True
                 position_ratio = 0.5
                 entry_mode = "A"
+
+            # ⚡ 模式 B3：二浪回踩右側試單 (允許 DIF < 0)
+            elif not in_position and not cd_active and mode_b3_wave2_buy:
+                act = "🟢 模式B3:二浪回踩右側止跌(建半倉)"
+                rsn = f"【二浪回踩】價格於MA20/MA60上方止跌且底比底高，KD/RSI轉強，MACD柱狀體連2日縮短，建半倉試單"
+                last_buy_index = i
+                mode_b_entry_index = i
+                mode_b_entry_low = low_p
+                in_position = True
+                position_ratio = 0.5
+                entry_mode = "B3"
+
+            # ⚡ 模式 B2：量能配合突破 (帶量突破 MA5/MA10)
+            elif not cd_active and vol_breakout:
+                if not in_position:
+                    act = "🚀 帶量突破MA5/10(建半倉)"
+                    rsn = f"【二浪啟動】成交量放大至5日均量{vol_p/vol_ma5:.1f}倍，強勢帶量突破MA5與MA10，直接進場建半倉"
+                    last_buy_index = i
+                    mode_b_entry_index = i
+                    mode_b_entry_low = low_p
+                    in_position = True
+                    position_ratio = 0.5
+                    entry_mode = "B2"
+                elif position_ratio == 0.5:
+                    act = "🚀 帶量突破MA5/10(補滿倉)"
+                    rsn = f"【二浪加碼】已有半倉，今日帶量({vol_p/vol_ma5:.1f}倍均量)突破MA5與MA10，順勢將倉位補滿至100%"
+                    last_buy_index = i
+                    position_ratio = 1.0
 
             elif not in_position and not cd_active and mode_b1_buy:
                 if is_bear_market:
@@ -935,7 +1014,7 @@ with tab1:
                         
                         if "100%清倉" in act_text or "離場" in act_text or "砍倉" in act_text:
                             st.error(f"**【操作建議】{act_text}** — {rsn_text}")
-                        elif "被禁用" in act_text or "否決" in act_text or "減倉" in act_text or "警惕" in act_text:
+                        elif "減" in act_text or "被禁用" in act_text or "否決" in act_text or "警惕" in act_text:
                             st.warning(f"**【操作建議】{act_text}** — {rsn_text}")
                         elif "模式" in act_text or "建倉" in act_text or "補滿倉" in act_text or "續抱" in act_text:
                             st.success(f"**【操作建議】{act_text}** — {rsn_text}")
@@ -1087,7 +1166,6 @@ with tab2:
             scan_results = []
             target_date_str = scan_target_date.strftime("%Y-%m-%d")
             
-            # 向前擷取 400 天歷史資料以準確計算 1 年漲跌幅與長天期技術指標
             fetch_start_date = (scan_target_date - timedelta(days=450)).strftime("%Y-%m-%d")
             
             progress_bar = st.progress(0)
@@ -1120,7 +1198,6 @@ with tab2:
                         prev_1y_close = df_calc['Close'].iloc[latest_idx - 240] if latest_idx >= 240 else np.nan
                         ret_1y = ((curr_close - prev_1y_close) / prev_1y_close * 100.0) if not np.isnan(prev_1y_close) else np.nan
 
-                        # ⚡ 呼叫診斷雷達引擎
                         setup_status, alert_msg, diag_desc = TechnicalAnalysisEngine.analyze_daily_radar(df_calc)
 
                         scan_results.append({
