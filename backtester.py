@@ -385,7 +385,7 @@ class TechnicalAnalysisEngine:
         df['Reason_20D'] = trend_reason_20d
 
         # ----------------------------------------------------
-        # 核心策略回測邏輯 (包含新特判: 模式A RSI負成長清倉)
+        # 核心策略回測邏輯
         # ----------------------------------------------------
         action_list = []
         reason_list = []
@@ -398,8 +398,8 @@ class TechnicalAnalysisEngine:
         entry_mode = ""
         entry_price = 0.0
         entry_low = 0.0
-        entry_index = -999
         entry_rsi = 0.0
+        entry_index = -999
         
         mode_b_pending = False
         mode_b_pending_low = 0.0
@@ -434,7 +434,6 @@ class TechnicalAnalysisEngine:
 
             bb_u = df['BB_Upper'].iloc[i]
             bb_u_diff5 = df['BB_Upper_5D_Diff'].iloc[i]
-            bw = df['BB_Bandwidth'].iloc[i]
 
             rsi = df['RSI14'].iloc[i]
             prev_rsi = df['RSI14'].iloc[i-1]
@@ -494,23 +493,23 @@ class TechnicalAnalysisEngine:
             # ----------------------------------------------------
             # 出場與清倉機制條件
             # ----------------------------------------------------
+            days_since_entry = i - entry_index
+
             macd_dc = (dif < dea) and (prev_dif >= prev_dea)
             macd_dc_and_below_ma20 = macd_dc and (close_p < m20)
 
-            # 模式 A 專屬清倉條件
-            days_since_entry = i - entry_index
-            mode_a_rsi_decay_exit = (entry_mode == "A") and (0 <= days_since_entry <= 4) and (rsi < entry_rsi)
+            # 模式 A 專屬清倉條件：
+            # 1. 虛高放棄建倉
             mode_a_fake_high_exit = (entry_mode == "A") and (temp_val > 80.0) and (close_p < entry_price * 1.03)
+            # 2. ⚡ 新增：弱死亡放棄建倉 (建倉日開始第 5 日回測 RSI 呈現負成長)
+            mode_a_weak_death_exit = (entry_mode == "A") and (days_since_entry == 5) and (rsi < entry_rsi)
 
-            # 模式 B 專屬清倉條件
             close_20d_max = df['Close'].iloc[max(0, i-19):i+1].max()
             is_near_20d_high = close_p >= (close_20d_max * 0.98)
             mode_b_exit_near_high = (entry_mode == "B") and is_near_20d_high and (prev_temp_val > 80.0) and macd_dc_and_below_ma20
 
-            # 模式 C 專屬清倉條件
             mode_c_macd_exhaust_exit = (entry_mode == "C") and (dif > 0) and (hist < 10.0) and ((prev_hist - hist) >= 10.0)
 
-            # 模式 B/C 共通三日認錯停損
             mode_bc_3d_failed = in_position and (entry_mode in ["B", "C"]) and (1 <= days_since_entry <= 3) and (close_p < entry_low)
 
             # ----------------------------------------------------
@@ -525,7 +524,7 @@ class TechnicalAnalysisEngine:
             act = "觀望待變"
             rsn = "指標未符合任何建倉或調整條件"
 
-            # 1. 核心清倉機制優先檢測
+            # 1. 七大清倉機制優先檢測
             if macd_dc_and_below_ma20 and in_position:
                 act = "🛑 100%清倉(MACD死叉+跌破MA20)"
                 rsn = f"MACD出現死叉且收盤價(${close_p:.2f})跌破MA20(${m20:.2f})，趨勢轉空，無條件全數清倉"
@@ -534,16 +533,16 @@ class TechnicalAnalysisEngine:
                 entry_mode = ""
                 mode_b_pending = False
 
-            elif mode_a_rsi_decay_exit and in_position:
-                act = "🛑 模式A弱死亡清倉(RSI衰退)"
-                rsn = f"模式A建倉後5日內RSI({rsi:.2f})低於建倉當日({entry_rsi:.2f})，動能呈現負成長，放棄建倉並全數清倉"
+            elif mode_a_fake_high_exit and in_position:
+                act = "🛑 模式A虛高清倉"
+                rsn = f"模式A持倉中市場溫度(${temp_val:.1f})>80，但收盤價未達建倉價+3%(${entry_price*1.03:.2f})，判定虛高離場"
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
 
-            elif mode_a_fake_high_exit and in_position:
-                act = "🛑 模式A虛高清倉"
-                rsn = f"模式A持倉中市場溫度(${temp_val:.1f})>80，但收盤價未達建倉價+3%(${entry_price*1.03:.2f})，判定虛高離場"
+            elif mode_a_weak_death_exit and in_position:
+                act = "🛑 模式A弱死亡清倉"
+                rsn = f"模式A建倉第5個交易日，當前RSI({rsi:.2f})低於建倉當日RSI({entry_rsi:.2f})呈現負成長，觸發弱死亡放棄建倉"
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
