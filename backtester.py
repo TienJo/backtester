@@ -385,7 +385,7 @@ class TechnicalAnalysisEngine:
         df['Reason_20D'] = trend_reason_20d
 
         # ----------------------------------------------------
-        # 核心策略回測邏輯 (嚴格執行新規格)
+        # 核心策略回測邏輯
         # ----------------------------------------------------
         action_list = []
         reason_list = []
@@ -398,8 +398,8 @@ class TechnicalAnalysisEngine:
         entry_mode = ""
         entry_price = 0.0
         entry_low = 0.0
-        entry_index = -999
         entry_rsi = 0.0
+        entry_index = -999
         
         mode_b_pending = False
         mode_b_pending_low = 0.0
@@ -497,27 +497,25 @@ class TechnicalAnalysisEngine:
             macd_dc = (dif < dea) and (prev_dif >= prev_dea)
             macd_dc_and_below_ma20 = macd_dc and (close_p < m20)
 
-            # 1. 模式 A 虛高清倉
+            # 模式 A 虛高清倉
             mode_a_fake_high_exit = (entry_mode == "A") and (temp_val > 80.0) and (close_p < entry_price * 1.03)
 
-            # ⚡ 2. 新增：模式 A 弱死亡放棄建倉 (建倉日後第 1~4 日內，RSI 未創新高且呈現負成長)
+            # 🔥 新增：模式 A 弱死亡放棄建倉 (T+4 回測 RSI 無新高且負成長)
             days_since_entry = i - entry_index
-            mode_a_weak_death_exit = (
-                in_position and (entry_mode == "A") and 
-                (1 <= days_since_entry <= 4) and 
-                (rsi <= entry_rsi) and 
-                (rsi_diff_1 < 0)
-            )
+            mode_a_weak_death_exit = False
+            if in_position and (entry_mode == "A") and (days_since_entry == 4):
+                rsi_4d_max = df['RSI14'].iloc[entry_index+1:i+1].max()
+                is_rsi_no_new_high = rsi_4d_max <= entry_rsi
+                is_rsi_negative_growth = rsi < entry_rsi
+                if is_rsi_no_new_high and is_rsi_negative_growth:
+                    mode_a_weak_death_exit = True
 
-            # 3. 模式 B 高位獲利清倉
             close_20d_max = df['Close'].iloc[max(0, i-19):i+1].max()
             is_near_20d_high = close_p >= (close_20d_max * 0.98)
             mode_b_exit_near_high = (entry_mode == "B") and is_near_20d_high and (prev_temp_val > 80.0) and macd_dc_and_below_ma20
 
-            # 4. 模式 C 動能衰竭清倉
             mode_c_macd_exhaust_exit = (entry_mode == "C") and (dif > 0) and (hist < 10.0) and ((prev_hist - hist) >= 10.0)
 
-            # 5. 模式 B 與 C 三日認錯停損
             mode_bc_3d_failed = in_position and (entry_mode in ["B", "C"]) and (1 <= days_since_entry <= 3) and (close_p < entry_low)
 
             # ----------------------------------------------------
@@ -532,7 +530,7 @@ class TechnicalAnalysisEngine:
             act = "觀望待變"
             rsn = "指標未符合任何建倉或調整條件"
 
-            # 1. 清倉機制優先檢測
+            # 1. 七大清倉機制優先檢測
             if macd_dc_and_below_ma20 and in_position:
                 act = "🛑 100%清倉(MACD死叉+跌破MA20)"
                 rsn = f"MACD出現死叉且收盤價(${close_p:.2f})跌破MA20(${m20:.2f})，趨勢轉空，無條件全數清倉"
@@ -550,7 +548,7 @@ class TechnicalAnalysisEngine:
 
             elif mode_a_weak_death_exit and in_position:
                 act = "🛑 模式A弱死亡放棄建倉"
-                rsn = f"模式A建倉後第{days_since_entry}天RSI({rsi:.1f})未超越建倉當日RSI({entry_rsi:.1f})且呈負成長，觸發弱死亡放棄建倉"
+                rsn = f"模式A建倉第4天回測，4天內RSI最高點({df['RSI14'].iloc[entry_index+1:i+1].max():.2f})未創新高且目前RSI({rsi:.2f})相較建倉日({entry_rsi:.2f})呈現負成長，觸發弱死亡100%清倉"
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
@@ -615,7 +613,7 @@ class TechnicalAnalysisEngine:
                     rsn = f"觸發模式C減倉機制，3日內禁止加倉(冷卻中)"
                 else:
                     act = "🚀 市場起立:準備起飛(加碼補滿倉)"
-                    rsn = f"已有半倉，股價站上MA20(${m20:.2f})且布林上軌5日持續擴張，補滿至100%滿倉"
+                    rsn = f"已有半倉，股價站上MA20(${m20:.2f})且布林上軌5日持續擴張，補碼至100%滿倉"
                     last_buy_index = i
                     position_ratio = 1.0
 
@@ -966,7 +964,7 @@ with tab1:
                         act_text = latest['Advice_Action']
                         rsn_text = latest['Advice_Reason']
                         
-                        if "100%清倉" in act_text or "離場" in act_text or "停損" in act_text or "放棄建倉" in act_text:
+                        if "100%清倉" in act_text or "離場" in act_text or "停損" in act_text or "弱死亡" in act_text:
                             st.error(f"**【操作建議】{act_text}** — {rsn_text}")
                         elif "被禁用" in act_text or "否決" in act_text or "減倉" in act_text or "取消" in act_text:
                             st.warning(f"**【操作建議】{act_text}** — {rsn_text}")
