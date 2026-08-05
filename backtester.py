@@ -385,7 +385,7 @@ class TechnicalAnalysisEngine:
         df['Reason_20D'] = trend_reason_20d
 
         # ----------------------------------------------------
-        # 核心策略回測邏輯 (嚴格執行新規格)
+        # 核心策略回測邏輯 (包含新特判: 模式A RSI負成長清倉)
         # ----------------------------------------------------
         action_list = []
         reason_list = []
@@ -399,6 +399,7 @@ class TechnicalAnalysisEngine:
         entry_price = 0.0
         entry_low = 0.0
         entry_index = -999
+        entry_rsi = 0.0
         
         mode_b_pending = False
         mode_b_pending_low = 0.0
@@ -496,15 +497,20 @@ class TechnicalAnalysisEngine:
             macd_dc = (dif < dea) and (prev_dif >= prev_dea)
             macd_dc_and_below_ma20 = macd_dc and (close_p < m20)
 
+            # 模式 A 專屬清倉條件
+            days_since_entry = i - entry_index
+            mode_a_rsi_decay_exit = (entry_mode == "A") and (0 <= days_since_entry <= 4) and (rsi < entry_rsi)
             mode_a_fake_high_exit = (entry_mode == "A") and (temp_val > 80.0) and (close_p < entry_price * 1.03)
 
+            # 模式 B 專屬清倉條件
             close_20d_max = df['Close'].iloc[max(0, i-19):i+1].max()
             is_near_20d_high = close_p >= (close_20d_max * 0.98)
             mode_b_exit_near_high = (entry_mode == "B") and is_near_20d_high and (prev_temp_val > 80.0) and macd_dc_and_below_ma20
 
+            # 模式 C 專屬清倉條件
             mode_c_macd_exhaust_exit = (entry_mode == "C") and (dif > 0) and (hist < 10.0) and ((prev_hist - hist) >= 10.0)
 
-            days_since_entry = i - entry_index
+            # 模式 B/C 共通三日認錯停損
             mode_bc_3d_failed = in_position and (entry_mode in ["B", "C"]) and (1 <= days_since_entry <= 3) and (close_p < entry_low)
 
             # ----------------------------------------------------
@@ -519,7 +525,7 @@ class TechnicalAnalysisEngine:
             act = "觀望待變"
             rsn = "指標未符合任何建倉或調整條件"
 
-            # 1. 六大清倉機制優先檢測
+            # 1. 核心清倉機制優先檢測
             if macd_dc_and_below_ma20 and in_position:
                 act = "🛑 100%清倉(MACD死叉+跌破MA20)"
                 rsn = f"MACD出現死叉且收盤價(${close_p:.2f})跌破MA20(${m20:.2f})，趨勢轉空，無條件全數清倉"
@@ -527,6 +533,13 @@ class TechnicalAnalysisEngine:
                 position_ratio = 0.0
                 entry_mode = ""
                 mode_b_pending = False
+
+            elif mode_a_rsi_decay_exit and in_position:
+                act = "🛑 模式A弱死亡清倉(RSI衰退)"
+                rsn = f"模式A建倉後5日內RSI({rsi:.2f})低於建倉當日({entry_rsi:.2f})，動能呈現負成長，放棄建倉並全數清倉"
+                in_position = False
+                position_ratio = 0.0
+                entry_mode = ""
 
             elif mode_a_fake_high_exit and in_position:
                 act = "🛑 模式A虛高清倉"
@@ -582,6 +595,7 @@ class TechnicalAnalysisEngine:
                     entry_index = i
                     entry_price = close_p
                     entry_low = mode_b_pending_low
+                    entry_rsi = rsi
                     in_position = True
                     position_ratio = 0.5
                     entry_mode = "B"
@@ -608,6 +622,7 @@ class TechnicalAnalysisEngine:
                     entry_index = i
                     entry_price = close_p
                     entry_low = low_p
+                    entry_rsi = rsi
                     in_position = True
                     position_ratio = 0.5
                     entry_mode = "A"
@@ -644,6 +659,7 @@ class TechnicalAnalysisEngine:
                         entry_index = i
                         entry_price = close_p
                         entry_low = low_p
+                        entry_rsi = rsi
                         in_position = True
                         position_ratio = 0.5
                         entry_mode = "C"
@@ -943,7 +959,7 @@ with tab1:
                         act_text = latest['Advice_Action']
                         rsn_text = latest['Advice_Reason']
                         
-                        if "100%清倉" in act_text or "離場" in act_text or "停損" in act_text:
+                        if "100%清倉" in act_text or "離場" in act_text or "停損" in act_text or "弱死亡" in act_text:
                             st.error(f"**【操作建議】{act_text}** — {rsn_text}")
                         elif "被禁用" in act_text or "否決" in act_text or "減倉" in act_text or "取消" in act_text:
                             st.warning(f"**【操作建議】{act_text}** — {rsn_text}")
