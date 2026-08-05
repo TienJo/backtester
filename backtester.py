@@ -1074,29 +1074,15 @@ with tab1:
                         fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['DIF'], mode='lines', name='DIF (快線)', line=dict(color='#2962FF', width=1.2)), row=4, col=1)
                         fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['DEA'], mode='lines', name='DEA (慢線)', line=dict(color='#FF6D00', width=1.2)), row=4, col=1)
                         
-                        # MACD 柱狀圖：加上文字數值標籤
                         macd_colors = ['#26a69a' if h >= 0 else '#ef5350' for h in df_sub['MACD_Hist']]
-                        macd_text = [f"{h:.2f}" for h in df_sub['MACD_Hist']]
-
-                        fig.add_trace(
-                            go.Bar(
-                                x=df_sub.index, 
-                                y=df_sub['MACD_Hist'], 
-                                name='MACD 柱狀圖', 
-                                marker_color=macd_colors,
-                                text=macd_text,
-                                textposition='outside',
-                                textfont=dict(size=10)
-                            ), 
-                            row=4, col=1
-                        )
+                        fig.add_trace(go.Bar(x=df_sub.index, y=df_sub['MACD_Hist'], name='MACD 柱狀圖', marker_color=macd_colors), row=4, col=1)
                         fig.add_hline(y=0, line_dash="solid", line_color="#9E9E9E", row=4, col=1)
 
                         fig.update_layout(
                             xaxis_rangeslider_visible=False,
                             hovermode="x unified",
                             template="plotly_white",
-                            height=950
+                            height=850
                         )
                         st.plotly_chart(fig, use_container_width=True)
 
@@ -1108,7 +1094,8 @@ with tab1:
                         show_df['RSI(14)'] = show_df['RSI14'].round(2)
                         show_df['MACD柱狀'] = show_df['MACD_Hist'].round(3)
                         
-                        show_cols = ["Open", "High", "Low", "Close", "Volume", "市場溫度 T", "RSI(14)", "Reason_5D", "Reason_20D", "Advice_Action", "Advice_Reason"]
+                        # 在顯示欄位清單 (show_cols) 中加入了 'MACD柱狀'
+                        show_cols = ["Open", "High", "Low", "Close", "Volume", "市場溫度 T", "RSI(14)", "MACD柱狀", "Reason_5D", "Reason_20D", "Advice_Action", "Advice_Reason"]
                         rename_dict = {
                             "Reason_5D": "5日格局原因",
                             "Reason_20D": "20日格局原因",
