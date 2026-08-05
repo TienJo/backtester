@@ -385,7 +385,7 @@ class TechnicalAnalysisEngine:
         df['Reason_20D'] = trend_reason_20d
 
         # ----------------------------------------------------
-        # 核心策略回測邏輯 (含模式A弱死亡新特徵)
+        # 核心策略回測邏輯
         # ----------------------------------------------------
         action_list = []
         reason_list = []
@@ -501,7 +501,7 @@ class TechnicalAnalysisEngine:
             # 清倉 2: 模式 A 虛高放棄建倉
             mode_a_fake_high_exit = (entry_mode == "A") and (temp_val > 80.0) and (close_p < entry_price * 1.03)
 
-            # 清倉 2.5: 模式 A 弱死亡放棄建倉 (新增)
+            # 清倉 2.5: 模式 A 弱死亡放棄建倉
             days_since_entry = i - entry_index
             is_mode_a_day4 = in_position and (entry_mode == "A") and (days_since_entry == 4)
             if is_mode_a_day4:
@@ -520,6 +520,16 @@ class TechnicalAnalysisEngine:
             # 清倉 4: 模式 C 動能衰竭清倉
             mode_c_macd_exhaust_exit = (entry_mode == "C") and (dif > 0) and (hist < 10.0) and ((prev_hist - hist) >= 10.0)
 
+            # 新增清倉條件 4.1: 模式 C 溫度>88、創新高且陽線最高價超過布林上軌5%
+            is_new_high_c = close_p > close_15d_max
+            is_bullish_candlestick = close_p > open_p
+            is_high_over_bbu_5pct = high_p > (bb_u * 1.05)
+            mode_c_overheat_exit = (entry_mode == "C") and (temp_val > 88.0) and is_new_high_c and is_bullish_candlestick and is_high_over_bbu_5pct
+
+            # 新增清倉條件 4.2: 模式 C 創新高後，收盤價單日下跌大於6%
+            daily_drop_pct = (close_p - df['Close'].iloc[i-1]) / df['Close'].iloc[i-1]
+            mode_c_drop_after_high_exit = (entry_mode == "C") and is_new_high_c and (daily_drop_pct < -0.06)
+
             # 清倉 5: 模式 B/C 三日認錯停損
             mode_bc_3d_failed = in_position and (entry_mode in ["B", "C"]) and (1 <= days_since_entry <= 3) and (close_p < entry_low)
 
@@ -535,7 +545,7 @@ class TechnicalAnalysisEngine:
             act = "觀望待變"
             rsn = "指標未符合任何建倉或調整條件"
 
-            # 1. 七大清倉機制優先檢測
+            # 1. 核心清倉機制優先檢測
             if macd_dc_and_below_ma20 and in_position:
                 act = "🛑 100%清倉(MACD死叉+跌破MA20)"
                 rsn = f"MACD出現死叉且收盤價(${close_p:.2f})跌破MA20(${m20:.2f})，趨勢轉空，無條件全數清倉"
@@ -561,6 +571,20 @@ class TechnicalAnalysisEngine:
             elif mode_b_exit_near_high and in_position:
                 act = "🛑 模式B高位獲利清倉"
                 rsn = f"股價位居20日高檔且前日溫度>80，出現MACD死叉並跌破MA20，鎖定獲利100%清倉"
+                in_position = False
+                position_ratio = 0.0
+                entry_mode = ""
+
+            elif mode_c_overheat_exit and in_position:
+                act = "🛑 模式C高溫過熱清倉"
+                rsn = f"模式C持倉中溫度({temp_val:.1f})>88且創新高，陽線最高價(${high_p:.2f})超過布林上軌5%(${bb_u*1.05:.2f})，極端過熱清倉"
+                in_position = False
+                position_ratio = 0.0
+                entry_mode = ""
+
+            elif mode_c_drop_after_high_exit and in_position:
+                act = "🛑 模式C新高暴跌清倉"
+                rsn = f"模式C持倉中股價創新高，但當日收盤價暴跌{abs(daily_drop_pct)*100:.2f}%(>6%)，反轉風險高，馬上清倉"
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
@@ -616,7 +640,7 @@ class TechnicalAnalysisEngine:
             elif (position_ratio == 0.5) and (close_p > m20) and (bb_u_diff5 > 0):
                 if i < mode_c_reduce_cooldown_until:
                     act = "🚫 暫停加倉(減倉冷卻期中)"
-                    rsn = f"觸發模式C減倉機制，3日內禁止加倉(冷卻中)"
+                    rsn = f"觸發模式C減倉機制，3日內禁止加碼(冷卻中)"
                 else:
                     act = "🚀 市場起立:準備起飛(加碼補滿倉)"
                     rsn = f"已有半倉，股價站上MA20(${m20:.2f})且布林上軌5日持續擴張，補滿至100%滿倉"
@@ -972,7 +996,7 @@ with tab1:
                         act_text = latest['Advice_Action']
                         rsn_text = latest['Advice_Reason']
                         
-                        if "100%清倉" in act_text or "離場" in act_text or "停損" in act_text:
+                        if "100%清倉" in act_text or "離場" in act_text or "停損" in act_text or "過熱清倉" in act_text or "暴跌清倉" in act_text:
                             st.error(f"**【操作建議】{act_text}** — {rsn_text}")
                         elif "被禁用" in act_text or "否決" in act_text or "減倉" in act_text or "取消" in act_text:
                             st.warning(f"**【操作建議】{act_text}** — {rsn_text}")
@@ -1094,7 +1118,6 @@ with tab1:
                         show_df['RSI(14)'] = show_df['RSI14'].round(2)
                         show_df['MACD柱狀'] = show_df['MACD_Hist'].round(3)
                         
-                        # 在顯示欄位清單 (show_cols) 中加入了 'MACD柱狀'
                         show_cols = ["Open", "High", "Low", "Close", "Volume", "市場溫度 T", "RSI(14)", "MACD柱狀", "Reason_5D", "Reason_20D", "Advice_Action", "Advice_Reason"]
                         rename_dict = {
                             "Reason_5D": "5日格局原因",
