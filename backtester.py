@@ -417,15 +417,14 @@ class TechnicalAnalysisEngine:
                 continue
 
             close_p = df['Close'].iloc[i]
-            prev_close_p = df['Close'].iloc[i-1]
             open_p = df['Open'].iloc[i]
             high_p = df['High'].iloc[i]
             low_p = df['Low'].iloc[i]
 
             m5 = df['MA5'].iloc[i]
             m20 = df['MA20'].iloc[i]
-            m20_diff_1d = df['MA20_Diff_1D'].iloc[i]
             m60 = df['MA60'].iloc[i]
+            m20_diff = df['MA20_Diff_1D'].iloc[i]
 
             bb_u = df['BB_Upper'].iloc[i]
             bb_u_diff5 = df['BB_Upper_5D_Diff'].iloc[i]
@@ -476,19 +475,26 @@ class TechnicalAnalysisEngine:
             rsi_surge_8 = rsi_diff_1 >= 8.0
             mode_a_buy = rsi_recent_oversold and rsi_surge_8
 
-            # ==========================================
-            # 💡 升級：模式 B1 進場條件嚴格判定
-            # ==========================================
+            # ---- 提升後的模式 B1 進場門檻 ----
             is_bull_env = (m20 > m60) or (dif > 0)
             cond_b1_env = (close_p > m60) and (dif > 0)
             cond_b1_rsi = (40.0 <= prev_rsi <= 50.0) and (rsi_diff_1 > 0)
+            touched_ma20_recent = (df['Low'].iloc[max(0, i-1):i+1] <= df['MA20'].iloc[max(0, i-1):i+1] * 1.015).any()
             
-            # 要求 MA20 必須明顯向上斜率, 收盤價高於 MA20 至少 1%~2%, 且當日低點高於昨日收盤價
-            ma20_slope_up = m20_diff_1d > 0
-            close_above_ma20_1pct = close_p >= (m20 * 1.01)
-            low_above_prev_close = low_p > prev_close_p
-
-            cond_b1_price = ma20_slope_up and close_above_ma20_1pct and low_above_prev_close and (close_p > open_p) and (close_p > m5)
+            # MA20 必須明顯向上斜率、收盤價高於 MA20 至少 1%~2%（取 1.01）、當日低點高於昨日收盤價
+            cond_b1_ma20_slope = m20_diff > 0
+            cond_b1_price_ma20 = close_p >= (m20 * 1.01)
+            prev_close_p = df['Close'].iloc[i-1]
+            cond_b1_low_above_prev_close = low_p > prev_close_p
+            
+            cond_b1_price = (
+                touched_ma20_recent and 
+                (close_p > open_p) and 
+                (close_p > m5) and 
+                cond_b1_ma20_slope and 
+                cond_b1_price_ma20 and 
+                cond_b1_low_above_prev_close
+            )
             mode_b1_buy = is_bull_env and cond_b1_env and cond_b1_rsi and cond_b1_price
 
             close_15d_max = df['Close'].iloc[max(0, i-14):i].max() if i >= 15 else df['Close'].iloc[:i].max()
@@ -497,20 +503,15 @@ class TechnicalAnalysisEngine:
             cond_b2_long_red = (close_p > open_p) and (close_p >= bb_u * 0.995)
             mode_b2_buy = cond_b2_ma_align and cond_b2_new_high and cond_b2_long_red
 
-            # MACD 死叉與破 MA20 基礎判斷
             macd_dc = (dif < dea) and (prev_dif >= prev_dea)
             macd_dc_and_below_ma20 = macd_dc and (close_p < m20)
 
-            # ==========================================
-            # 💡 升級：模式 B 高檔離場 (20日新高 + 死叉 + 破MA20 + 前日溫度>80)
-            # ==========================================
-            near_20d_high = close_p >= (close_20d_max * 0.97)
-            mode_b_high_temp_exit = near_20d_high and macd_dc and (close_p < m20) and (prev_temp_val > 80.0)
-
-            # ==========================================
-            # 💡 升級：B2 模式動能衰竭離場 (MACD>0 但柱狀體/DIF比昨日驟減>=10)
-            # ==========================================
-            b2_macd_drop_exit = (entry_mode == "B2" or (in_position and entry_mode == "B")) and (dif > 0) and ((prev_hist - hist) >= 10.0 or (prev_dif - dif) >= 10.0)
+            # 新增離場機制判定
+            is_near_20d_high = close_p >= (close_20d_max * 0.98)
+            mode_b_exit_near_high = (entry_mode == "B") and is_near_20d_high and macd_dc and (close_p < m20) and (prev_temp_val > 80.0)
+            
+            # B2 專屬離場機制：MACD > 0，但當日 MACD < 10 且比昨日減少了 >= 10
+            b2_macd_exit = (entry_mode == "B2") and (dif > 0) and (hist < 10) and ((prev_hist - hist) >= 10)
 
             days_since_mode_b = i - mode_b_entry_index
             mode_b_3d_failed = False
@@ -525,23 +526,23 @@ class TechnicalAnalysisEngine:
             act = "觀望待變"
             rsn = "指標未符合【模式A抄底】或【模式B主升浪順勢突破】之建倉門檻"
 
-            if mode_b_high_temp_exit and in_position and (entry_mode in ["B", "B1", "B2"]):
-                act = "🛑 模式B 20日高位過熱清倉"
-                rsn = f"處於20日高位附近且昨日溫度T({prev_temp_val:.1f})>80，今日出現MACD死叉並跌破MA20({m20:.2f})，觸發高檔立即清倉離場"
-                in_position = False
-                position_ratio = 0.0
-                entry_mode = ""
-
-            elif b2_macd_drop_exit and in_position:
-                act = "🛑 B2動能急墜清倉"
-                rsn = f"當前MACD>0，但今日MACD指標較昨日大幅下跌驟減超10點，觸發B2防禦機制，即刻清倉離場"
-                in_position = False
-                position_ratio = 0.0
-                entry_mode = ""
-
-            elif macd_dc_and_below_ma20 and in_position:
+            if macd_dc_and_below_ma20 and in_position:
                 act = "🛑 MACD死叉+跌破MA20(100%清倉)"
                 rsn = f"MACD出現死叉且股價({close_p:.2f})跌破MA20({m20:.2f})，趨勢轉空，全數清倉避險"
+                in_position = False
+                position_ratio = 0.0
+                entry_mode = ""
+
+            elif mode_b_exit_near_high and in_position:
+                act = "🛑 模式B 20日新高高檔清倉"
+                rsn = f"位於20日新高附近且前日市場溫度T({prev_temp_val:.1f})>80，出現MACD死叉並跌破MA20，即刻全數清倉"
+                in_position = False
+                position_ratio = 0.0
+                entry_mode = ""
+
+            elif b2_macd_exit and in_position:
+                act = "🛑 模式B2 MACD動能衰竭清倉"
+                rsn = f"MACD在水上但當日柱狀體({hist:.2f})<10且較昨日驟降({prev_hist - hist:.2f}>=10)，觸發動能急速衰退清倉"
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
@@ -576,7 +577,7 @@ class TechnicalAnalysisEngine:
                     rsn = f"市場溫度T的10日均線下滑且T值({temp_val:.1f})<50，屬動能失血之弱勢勾頭，拒絕開倉"
                 else:
                     act = "🟢 模式B1:強勢回檔再發動(建半倉)"
-                    rsn = f"【模式B1提升版】MA20顯著向上，收盤高於MA20超1%且低點高於昨日收盤價，觸發強勢進場建半倉"
+                    rsn = f"【模式B1】MA20顯著向上，價格高於MA20超1%且當日低點高於昨日收盤，滿足優化建倉條件"
                     last_buy_index = i
                     mode_b_entry_index = i
                     mode_b_entry_low = low_p
@@ -932,7 +933,7 @@ with tab1:
                         act_text = latest['Advice_Action']
                         rsn_text = latest['Advice_Reason']
                         
-                        if "100%清倉" in act_text or "離場" in act_text or "砍倉" in act_text or "過熱清倉" in act_text or "動能急墜" in act_text:
+                        if "100%清倉" in act_text or "離場" in act_text or "砍倉" in act_text:
                             st.error(f"**【操作建議】{act_text}** — {rsn_text}")
                         elif "被禁用" in act_text or "否決" in act_text or "減倉" in act_text or "警惕" in act_text:
                             st.warning(f"**【操作建議】{act_text}** — {rsn_text}")
