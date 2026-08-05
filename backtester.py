@@ -1074,15 +1074,29 @@ with tab1:
                         fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['DIF'], mode='lines', name='DIF (快線)', line=dict(color='#2962FF', width=1.2)), row=4, col=1)
                         fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['DEA'], mode='lines', name='DEA (慢線)', line=dict(color='#FF6D00', width=1.2)), row=4, col=1)
                         
+                        # MACD 柱狀圖：加上文字數值標籤
                         macd_colors = ['#26a69a' if h >= 0 else '#ef5350' for h in df_sub['MACD_Hist']]
-                        fig.add_trace(go.Bar(x=df_sub.index, y=df_sub['MACD_Hist'], name='MACD 柱狀圖', marker_color=macd_colors), row=4, col=1)
+                        macd_text = [f"{h:.2f}" for h in df_sub['MACD_Hist']]
+
+                        fig.add_trace(
+                            go.Bar(
+                                x=df_sub.index, 
+                                y=df_sub['MACD_Hist'], 
+                                name='MACD 柱狀圖', 
+                                marker_color=macd_colors,
+                                text=macd_text,
+                                textposition='outside',
+                                textfont=dict(size=10)
+                            ), 
+                            row=4, col=1
+                        )
                         fig.add_hline(y=0, line_dash="solid", line_color="#9E9E9E", row=4, col=1)
 
                         fig.update_layout(
                             xaxis_rangeslider_visible=False,
                             hovermode="x unified",
                             template="plotly_white",
-                            height=850
+                            height=950
                         )
                         st.plotly_chart(fig, use_container_width=True)
 
