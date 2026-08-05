@@ -385,7 +385,7 @@ class TechnicalAnalysisEngine:
         df['Reason_20D'] = trend_reason_20d
 
         # ----------------------------------------------------
-        # 核心策略回測邏輯 (含模式A弱死亡新特徵與模式C新清倉條件)
+        # 核心策略回測邏輯 (含模式A弱死亡新特徵)
         # ----------------------------------------------------
         action_list = []
         reason_list = []
@@ -501,7 +501,7 @@ class TechnicalAnalysisEngine:
             # 清倉 2: 模式 A 虛高放棄建倉
             mode_a_fake_high_exit = (entry_mode == "A") and (temp_val > 80.0) and (close_p < entry_price * 1.03)
 
-            # 清倉 2.5: 模式 A 弱死亡放棄建倉
+            # 清倉 2.5: 模式 A 弱死亡放棄建倉 (新增)
             days_since_entry = i - entry_index
             is_mode_a_day4 = in_position and (entry_mode == "A") and (days_since_entry == 4)
             if is_mode_a_day4:
@@ -520,16 +520,6 @@ class TechnicalAnalysisEngine:
             # 清倉 4: 模式 C 動能衰竭清倉
             mode_c_macd_exhaust_exit = (entry_mode == "C") and (dif > 0) and (hist < 10.0) and ((prev_hist - hist) >= 10.0)
 
-            # 新增清倉條件 4.1: 模式 C 溫度>90 且陽線新高細線刺破上軌
-            is_yang_candle = close_p > open_p
-            high_20d_max = df['High'].iloc[max(0, i-19):i].max() if i >= 20 else df['High'].iloc[:i].max()
-            is_high_new_high = high_p > high_20d_max
-            is_fine_line_pierce_bbu = high_p > bb_u
-            mode_c_temp90_pierce_exit = (entry_mode == "C") and (temp_val > 90.0) and is_yang_candle and is_high_new_high and is_fine_line_pierce_bbu
-
-            # 新增清倉條件 4.2: 模式 C 陽線超過布林上軌 5%
-            mode_c_over_bbu_5pct_exit = (entry_mode == "C") and is_yang_candle and (close_p > bb_u * 1.05)
-
             # 清倉 5: 模式 B/C 三日認錯停損
             mode_bc_3d_failed = in_position and (entry_mode in ["B", "C"]) and (1 <= days_since_entry <= 3) and (close_p < entry_low)
 
@@ -545,7 +535,7 @@ class TechnicalAnalysisEngine:
             act = "觀望待變"
             rsn = "指標未符合任何建倉或調整條件"
 
-            # 1. 核心清倉機制優先檢測
+            # 1. 七大清倉機制優先檢測
             if macd_dc_and_below_ma20 and in_position:
                 act = "🛑 100%清倉(MACD死叉+跌破MA20)"
                 rsn = f"MACD出現死叉且收盤價(${close_p:.2f})跌破MA20(${m20:.2f})，趨勢轉空，無條件全數清倉"
@@ -578,20 +568,6 @@ class TechnicalAnalysisEngine:
             elif mode_c_macd_exhaust_exit and in_position:
                 act = "🛑 模式C動能衰竭清倉"
                 rsn = f"模式C持倉中MACD水上柱狀體({hist:.2f})<10且較前日驟降({prev_hist - hist:.2f}>=10)，動能失血清倉"
-                in_position = False
-                position_ratio = 0.0
-                entry_mode = ""
-
-            elif mode_c_temp90_pierce_exit and in_position:
-                act = "🛑 模式C極致過熱清倉"
-                rsn = f"模式C持倉中市場溫度({temp_val:.1f})>90，且收強勢陽線、最高價(${high_p:.2f})創新高並刺破布林上軌(${bb_u:.2f})，觸發高檔獲利了結清倉"
-                in_position = False
-                position_ratio = 0.0
-                entry_mode = ""
-
-            elif mode_c_over_bbu_5pct_exit and in_position:
-                act = "🛑 模式C乖離過大清倉"
-                rsn = f"模式C持倉中陽線收盤價(${close_p:.2f})超過布林上軌5%(${bb_u * 1.05:.2f})，正乖離過大，觸發清倉機制"
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
@@ -996,7 +972,7 @@ with tab1:
                         act_text = latest['Advice_Action']
                         rsn_text = latest['Advice_Reason']
                         
-                        if "100%清倉" in act_text or "離場" in act_text or "停損" in act_text or "清倉" in act_text:
+                        if "100%清倉" in act_text or "離場" in act_text or "停損" in act_text:
                             st.error(f"**【操作建議】{act_text}** — {rsn_text}")
                         elif "被禁用" in act_text or "否決" in act_text or "減倉" in act_text or "取消" in act_text:
                             st.warning(f"**【操作建議】{act_text}** — {rsn_text}")
@@ -1087,7 +1063,6 @@ with tab1:
 
                         fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Temperature'], mode='lines', name='溫度 T', line=dict(color='#FF3D00', width=2)), row=2, col=1)
                         fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Temperature_MA10'], mode='lines', name='溫度 T 10日均線', line=dict(color='#FFA726', width=1, dash='dot')), row=2, col=1)
-                        fig.add_hline(y=90, line_dash="dash", line_color="#D50000", row=2, col=1)
                         fig.add_hline(y=75, line_dash="dash", line_color="#FF1744", row=2, col=1)
                         fig.add_hline(y=50, line_dash="dash", line_color="#00E676", row=2, col=1)
 
@@ -1119,7 +1094,8 @@ with tab1:
                         show_df['RSI(14)'] = show_df['RSI14'].round(2)
                         show_df['MACD柱狀'] = show_df['MACD_Hist'].round(3)
                         
-                        show_cols = ["Open", "High", "Low", "Close", "Volume", "市場溫度 T", "RSI(14)", "Reason_5D", "Reason_20D", "Advice_Action", "Advice_Reason"]
+                        # 在顯示欄位清單 (show_cols) 中加入了 'MACD柱狀'
+                        show_cols = ["Open", "High", "Low", "Close", "Volume", "市場溫度 T", "RSI(14)", "MACD柱狀", "Reason_5D", "Reason_20D", "Advice_Action", "Advice_Reason"]
                         rename_dict = {
                             "Reason_5D": "5日格局原因",
                             "Reason_20D": "20日格局原因",
