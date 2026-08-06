@@ -384,7 +384,7 @@ class TechnicalAnalysisEngine:
         df['Reason_20D'] = trend_reason_20d
 
         # ----------------------------------------------------
-        # 核心策略回測邏輯 (含模式 B 順延建倉規則)
+        # 核心策略回測邏輯 (模式 B 修正為即時建倉)
         # ----------------------------------------------------
         action_list = []
         reason_list = []
@@ -400,11 +400,6 @@ class TechnicalAnalysisEngine:
         entry_index = -999
         entry_temp = 0.0
         entry_rsi = 0.0
-        
-        mode_b_pending = False
-        mode_b_pending_close = 0.0
-        mode_b_pending_low = 0.0
-        mode_b_pending_days = 0
         
         mode_c_reduce_cooldown_until = -999
 
@@ -588,7 +583,7 @@ class TechnicalAnalysisEngine:
             )
 
             # ----------------------------------------------------
-            # 邏輯判定順序 (清倉 > 減倉 > T+1/T+2建倉 > 模式A觸軌重建 > 新訊號觸發)
+            # 邏輯判定順序 (清倉 > 減倉 > 加倉 > 模式A觸軌重建 > 新訊號觸發)
             # ----------------------------------------------------
             act = "觀望待變"
             rsn = "指標未符合任何建倉或調整條件"
@@ -600,7 +595,6 @@ class TechnicalAnalysisEngine:
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
-                mode_b_pending = False
                 mode_a_approached_ma20 = False
 
             elif mode_b_exhaustion_exit and in_position:
@@ -676,57 +670,7 @@ class TechnicalAnalysisEngine:
                 position_ratio = 0.5
                 mode_c_reduce_cooldown_until = i + 3
 
-            # 3. 處理模式 B 之 T+1 / T+2 建倉與順延邏輯
-            elif mode_b_pending:
-                if cond_bear_or_underwater:
-                    act = "🚫 模式B建倉取消(市場環境轉壞)"
-                    rsn = "預備執行模式B建倉當日陷入熊市或MACD水下狀態，取消建倉"
-                    mode_b_pending = False
-                elif cond_high_divergence:
-                    act = "⚠️ 模式B建倉取消(高檔背離)"
-                    rsn = "預備執行模式B建倉當日觸發高檔極致背離，取消建倉"
-                    mode_b_pending = False
-                elif cond_weak_hook:
-                    act = "⚠️ 模式B建倉取消(弱勢勾頭)"
-                    rsn = "預備執行模式B建倉當日觸發弱勢勾頭否決，取消建倉"
-                    mode_b_pending = False
-                else:
-                    if mode_b_pending_days == 0:
-                        # T+1 日判定
-                        if close_p > mode_b_pending_close:
-                            act = "🟡 模式B建倉順延(T+1價高於T日)"
-                            rsn = f"模式B條件於T日成立，因T+1日收盤價(${close_p:.2f})高於T日收盤價(${mode_b_pending_close:.2f})，建倉操作順延至T+2日"
-                            mode_b_pending_days = 1
-                            mode_b_pending_low = min(mode_b_pending_low, low_p)
-                        else:
-                            act = "🟢 模式B:強勢回檔(T+1日執行建半倉)"
-                            rsn = f"前一交易日(T日)滿足【模式B】條件，且T+1日收盤未高於T日收盤，正式執行買入50%半倉"
-                            last_buy_index = i
-                            entry_index = i
-                            entry_price = close_p
-                            entry_low = min(mode_b_pending_low, low_p)
-                            entry_temp = temp_val
-                            entry_rsi = rsi
-                            in_position = True
-                            position_ratio = 0.5
-                            entry_mode = "B"
-                            mode_b_pending = False
-                    else:
-                        # T+2 日正式執行建倉
-                        act = "🟢 模式B:強勢回檔(順延至T+2日執行建半倉)"
-                        rsn = f"T日滿足【模式B】條件，因T+1日收盤價高於T日收盤價而順延，今日(T+2日)正式執行買入50%半倉"
-                        last_buy_index = i
-                        entry_index = i
-                        entry_price = close_p
-                        entry_low = min(mode_b_pending_low, low_p)
-                        entry_temp = temp_val
-                        entry_rsi = rsi
-                        in_position = True
-                        position_ratio = 0.5
-                        entry_mode = "B"
-                        mode_b_pending = False
-
-            # 4. 加倉機制檢測 (市場起立:準備起飛)
+            # 3. 加倉機制檢測 (市場起立:準備起飛)
             elif (position_ratio in [0.2, 0.5]) and (close_p > m20) and (bb_u_diff5 > 0):
                 if i < mode_c_reduce_cooldown_until:
                     act = "🚫 暫停加倉(減倉冷卻期中)"
@@ -737,7 +681,7 @@ class TechnicalAnalysisEngine:
                     last_buy_index = i
                     position_ratio = 1.0
 
-            # 5. 模式 A 觸軌創新低重建檢測
+            # 4. 模式 A 觸軌創新低重建檢測
             elif not in_position and mode_a_reentry_pending:
                 if (low_p <= bb_l) and (low_p < mode_a_min_low_since_entry):
                     act = "🟢 模式A:觸軌創新低(重新建半倉)"
@@ -758,7 +702,7 @@ class TechnicalAnalysisEngine:
                     act = "⏳ 模式A等待觸軌新低"
                     rsn = f"前次模式A無力突破清倉，持續等待股價觸碰布林下軌(${bb_l:.2f})且低於近期低點(${mode_a_min_low_since_entry:.2f})"
 
-            # 6. 常規新進場觸發檢測
+            # 5. 常規新進場觸發檢測
             elif not in_position and not cd_buy_active:
                 # 試驗模式 A
                 if mode_a_buy_signal:
@@ -777,7 +721,7 @@ class TechnicalAnalysisEngine:
                     mode_a_reentry_pending = False
                     mode_a_min_low_since_entry = low_p
 
-                # 試驗模式 B
+                # 試驗模式 B (即時建倉，不需順延隔天)
                 elif mode_b_buy_signal:
                     if cond_bear_or_underwater:
                         act = "🚫 模式B被禁用(熊市/MACD水下)"
@@ -789,12 +733,17 @@ class TechnicalAnalysisEngine:
                         act = "⚠️ 模式B被否決(弱勢勾頭)"
                         rsn = "市場溫度10日線下滑且溫度<50度，屬動能失血，拒絕開倉"
                     else:
-                        act = "🟡 模式B條件成立(等待隔日建倉)"
-                        rsn = f"【模式B強勢回檔】條件成立(T日)！將於T+1日評估是否建倉或順延"
-                        mode_b_pending = True
-                        mode_b_pending_close = close_p
-                        mode_b_pending_low = low_p
-                        mode_b_pending_days = 0
+                        act = "🟢 模式B:強勢回檔(建半倉)"
+                        rsn = f"【模式B強勢回檔】條件成立！當日即時執行買入50%半倉"
+                        last_buy_index = i
+                        entry_index = i
+                        entry_price = close_p
+                        entry_low = low_p
+                        entry_temp = temp_val
+                        entry_rsi = rsi
+                        in_position = True
+                        position_ratio = 0.5
+                        entry_mode = "B"
 
                 # 試驗模式 C
                 elif mode_c_buy_signal:
@@ -1119,7 +1068,7 @@ with tab1:
                         
                         if "100%清倉" in act_text or "離場" in act_text or "停損" in act_text or "過熱清倉" in act_text or "無力突破清倉" in act_text or "強弩之末" in act_text:
                             st.error(f"**【操作建議】{act_text}** — {rsn_text}")
-                        elif "被禁用" in act_text or "否決" in act_text or "減倉" in act_text or "取消" in act_text or "等待觸軌" in act_text or "順延" in act_text:
+                        elif "被禁用" in act_text or "否決" in act_text or "減倉" in act_text or "取消" in act_text or "等待觸軌" in act_text:
                             st.warning(f"**【操作建議】{act_text}** — {rsn_text}")
                         elif "模式" in act_text or "建倉" in act_text or "補滿倉" in act_text or "續抱" in act_text:
                             st.success(f"**【操作建議】{act_text}** — {rsn_text}")
