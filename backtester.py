@@ -505,17 +505,18 @@ class TechnicalAnalysisEngine:
 
             days_since_entry = i - entry_index
 
-            # 更新模式 A 持倉期間最低價，以及判定是否出現「靠近 MA20 的陽線且收盤價無法突破 MA20」
+            # 更新模式 A 持倉期間最低價，以及判定「兩周內(10交易日內)是否有靠近 MA20 的陽線且收盤價無法突破 MA20」
             if in_position and entry_mode == "A":
                 mode_a_min_low_since_entry = min(mode_a_min_low_since_entry, low_p)
-                is_bull_k_near_ma20 = (close_p > open_p) and (high_p >= m20 * 0.98) and (close_p < m20)
-                if is_bull_k_near_ma20:
-                    mode_a_failed_breakout_ma20 = True
+                if days_since_entry <= 10:
+                    is_bull_k_near_ma20 = (close_p > open_p) and (high_p >= m20 * 0.98) and (close_p < m20)
+                    if is_bull_k_near_ma20:
+                        mode_a_failed_breakout_ma20 = True
 
-            # 模式 A 清倉：先前靠近 MA20 的陽線無法突破，且後續回踩 5 日線 (Low <= MA5)
+            # 模式 A 清倉：滿足兩周內突破失敗後，後續跌破 MA5 且當日 MA10 > MA5
             mode_a_ma20_ma5_exit = False
             if in_position and entry_mode == "A" and mode_a_failed_breakout_ma20:
-                if low_p <= m5:
+                if (close_p < m5 or low_p <= m5) and (m10 > m5):
                     mode_a_ma20_ma5_exit = True
 
             # 清倉 2: 模式 A 虛高放棄建倉
@@ -603,8 +604,8 @@ class TechnicalAnalysisEngine:
                 entry_mode = ""
 
             elif mode_a_ma20_ma5_exit and in_position:
-                act = "🛑 模式A靠近MA20突破失敗+回踩5日線清倉"
-                rsn = f"模式A建倉後陽線靠近MA20(${m20:.2f})無法收突破，今日回踩5日線(${m5:.2f})，判定反彈力竭全數清倉，並等待觸碰布林下軌創新低重進"
+                act = "🛑 模式A兩周內MA20突破失敗+跌破MA5(MA10>MA5)清倉"
+                rsn = f"模式A建倉後兩周內陽線靠近MA20(${m20:.2f})無法突破，今日跌破5日線(${m5:.2f})且當日MA10(${m10:.2f})>MA5(${m5:.2f})，判定反彈無力全數清倉，等待觸碰布林下軌創新低重進"
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
@@ -1198,7 +1199,6 @@ with tab1:
                         
                         display_df = show_df[show_cols].rename(columns=rename_dict).sort_index(ascending=False)
 
-                        # 設定不自動換行，並開放寬度讓使用者橫向滾動到底完全顯示
                         st.dataframe(
                             display_df,
                             use_container_width=True,
