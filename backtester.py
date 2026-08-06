@@ -280,6 +280,7 @@ class TechnicalAnalysisEngine:
         
         df['BB_Upper_5D_Diff'] = df['BB_Upper'].diff(5)
         df['MA20_Diff_1D'] = df['MA20'].diff(1)
+        df['MA20_Diff_5D'] = df['MA20'].diff(5)  # 新增：MA20 近 5 日變化量
 
         # 2. 量能與量比
         df['Vol_MA5'] = df['Volume'].rolling(5).mean()
@@ -384,7 +385,7 @@ class TechnicalAnalysisEngine:
         df['Reason_20D'] = trend_reason_20d
 
         # ----------------------------------------------------
-        # 核心策略回測邏輯 (含模式A新功能規則)
+        # 核心策略回測邏輯 (包含模式 B/C MA20 5日趨勢向上規則)
         # ----------------------------------------------------
         action_list = []
         reason_list = []
@@ -401,11 +402,11 @@ class TechnicalAnalysisEngine:
         entry_temp = 0.0
         entry_rsi = 0.0
         
-        # 模式 A 新增狀態變數
-        mode_a_ma20_fail_flag = False      # 記錄建倉7天內是否曾出現靠近MA20陽線且未突破
-        mode_a_search_new_low = False     # 是否開啟尋找新低點機制
-        mode_a_search_start_idx = -999    # 開啟尋找新低點的索引位置
-        mode_a_last_exit_min_low = 999999.0 # 清倉時或清倉前的低點基準
+        # 模式 A 狀態變數
+        mode_a_ma20_fail_flag = False
+        mode_a_search_new_low = False
+        mode_a_search_start_idx = -999
+        mode_a_last_exit_min_low = 999999.0
         
         mode_b_pending = False
         mode_b_pending_low = 0.0
@@ -438,6 +439,7 @@ class TechnicalAnalysisEngine:
             m20 = df['MA20'].iloc[i]
             m60 = df['MA60'].iloc[i]
             m20_diff = df['MA20_Diff_1D'].iloc[i]
+            m20_diff5 = df['MA20_Diff_5D'].iloc[i] # 取得 MA20 5日變化量
 
             bb_u = df['BB_Upper'].iloc[i]
             bb_l = df['BB_Lower'].iloc[i]
@@ -474,6 +476,9 @@ class TechnicalAnalysisEngine:
             cond_weak_hook = temp_ma10_declining and (temp_val < 50.0)
 
             cd_buy_active = (i - last_buy_index) < 5
+            
+            # 共用條件：MA20 的 5日趨勢向上
+            cond_ma20_up_5d = m20_diff5 > 0
 
             # ----------------------------------------------------
             # 進場訊號觸發條件
@@ -482,19 +487,19 @@ class TechnicalAnalysisEngine:
             rsi_recent_oversold = (df['RSI14'].iloc[max(0, i-4):i+1] < 30.0).any()
             mode_a_buy_signal = rsi_recent_oversold and (rsi_diff_1 >= 8.0)
 
-            # 模式 B: 強勢回檔再發動
+            # 模式 B: 強勢回檔再發動 (需 MA20 5日趨勢向上)
             cond_b_env = ((m20 > m60) or (dif > 0)) and (close_p > m60) and (dif > 0)
             cond_b_rsi = (40.0 <= prev_rsi <= 50.0) and (rsi_diff_1 > 0)
             touched_ma20_recent = (df['Low'].iloc[max(0, i-1):i+1] <= df['MA20'].iloc[max(0, i-1):i+1] * 1.015).any()
             cond_b_price = (
                 touched_ma20_recent and (close_p > open_p) and (close_p > m5) and 
-                (m20_diff > 0) and (close_p >= m20 * 1.01) and (low_p > df['Close'].iloc[i-1])
+                (m20_diff > 0) and cond_ma20_up_5d and (close_p >= m20 * 1.01) and (low_p > df['Close'].iloc[i-1])
             )
             mode_b_buy_signal = cond_b_env and cond_b_rsi and cond_b_price
 
-            # 模式 C: 平台突破 (不受高檔背離否決限制)
+            # 模式 C: 平台突破 (需 MA20 5日趨勢向上)
             close_15d_max = df['Close'].iloc[max(0, i-14):i].max() if i >= 15 else df['Close'].iloc[:i].max()
-            cond_c_ma_align = (close_p > m20) and (m20 > m60)
+            cond_c_ma_align = (close_p > m20) and (m20 > m60) and cond_ma20_up_5d
             cond_c_new_high = close_p > close_15d_max
             cond_c_long_red = (close_p > open_p) and (close_p >= bb_u * 0.995)
             mode_c_buy_signal = cond_c_ma_align and cond_c_new_high and cond_c_long_red
@@ -519,7 +524,7 @@ class TechnicalAnalysisEngine:
             else:
                 mode_a_weak_death_exit = False
 
-            # 清倉 2.6 (新增): 模式 A 建倉 7 天內靠近 MA20 未破且跌破 MA5，需配合 MA10 > MA5
+            # 清倉 2.6: 模式 A 建倉 7 天內靠近 MA20 未破且跌破 MA5 (配 MA10 > MA5)
             mode_a_ma20_fail_exit = False
             if in_position and (entry_mode == "A") and (1 <= days_since_entry <= 7):
                 is_yang_near_ma20 = (close_p > open_p) and (high_p >= m20 * 0.985) and (close_p < m20)
@@ -553,7 +558,6 @@ class TechnicalAnalysisEngine:
             act = "觀望待變"
             rsn = "指標未符合任何建倉或調整條件"
 
-            # 檢查模式 A 尋找新低點機制是否逾期 (最多7天)
             if mode_a_search_new_low and (i - mode_a_search_start_idx > 7):
                 mode_a_search_new_low = False
 
@@ -575,7 +579,6 @@ class TechnicalAnalysisEngine:
                 entry_mode = ""
                 mode_a_ma20_fail_flag = False
                 
-                # 啟用尋找新低點模式
                 mode_a_search_new_low = True
                 mode_a_search_start_idx = i
                 mode_a_last_exit_min_low = df['Low'].iloc[entry_index:i+1].min()
@@ -715,7 +718,7 @@ class TechnicalAnalysisEngine:
                         rsn = "市場溫度10日線下滑且溫度<50度，屬動能失血，拒絕開倉"
                     else:
                         act = "🟡 模式B條件成立(等待隔日建倉)"
-                        rsn = f"【模式B強勢回檔】條件成立！市場情緒過高，將於下一交易日執行建倉"
+                        rsn = f"【模式B強勢回檔】條件成立(且MA20 5日趨勢向上)！將於下一交易日執行建倉"
                         mode_b_pending = True
                         mode_b_pending_low = low_p
 
@@ -729,7 +732,7 @@ class TechnicalAnalysisEngine:
                         rsn = "市場溫度10日線下滑且溫度<50度，拒絕開倉"
                     else:
                         act = "🟢 模式C:平台突破(建半倉)"
-                        rsn = f"【模式C平台突破】多頭排列下創15日新高且收盤達布林上軌0.995倍，開倉50%半倉"
+                        rsn = f"【模式C平台突破】多頭排列下創15日新高、MA20 5日趨勢向上且收盤達布林上軌0.995倍，開倉50%半倉"
                         last_buy_index = i
                         entry_index = i
                         entry_price = close_p
