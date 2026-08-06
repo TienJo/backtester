@@ -537,19 +537,19 @@ class TechnicalAnalysisEngine:
             is_near_20d_high = close_p >= (close_20d_max * 0.98)
             mode_b_exit_near_high = (entry_mode == "B") and is_near_20d_high and (prev_temp_val > 80.0) and macd_dc_and_below_ma20
 
-            # 清倉 3.5: 模式 B 強弩之末清倉 (陽線最高點創新高，但溫度不是4日內新高)
+            # 清倉 3.5 (修正): 模式 B 強弩之末清倉 (陽線高點創新高，溫度不是4日內新高且低於4日最高溫2度以上)
             is_bull_k = close_p > open_p
             high_15d_max = df['High'].iloc[max(0, i-14):i].max() if i >= 15 else df['High'].iloc[:i].max()
             is_high_new_high = high_p >= high_15d_max
             temp_4d_max = df['Temperature'].iloc[max(0, i-3):i].max() if i >= 3 else df['Temperature'].iloc[:i].max()
-            temp_not_4d_high = temp_val < temp_4d_max
+            temp_not_4d_high_and_lower_2deg = (temp_val < temp_4d_max) and ((temp_4d_max - temp_val) >= 2.0)
 
             mode_b_exhaustion_exit = (
                 in_position and 
                 (entry_mode == "B") and 
                 is_bull_k and 
                 is_high_new_high and 
-                temp_not_4d_high
+                temp_not_4d_high_and_lower_2deg
             )
 
             # 清倉 4: 模式 C 動能衰竭清倉
@@ -598,7 +598,7 @@ class TechnicalAnalysisEngine:
 
             elif mode_b_exhaustion_exit and in_position:
                 act = "🛑 模式B強弩之末清倉"
-                rsn = f"模式B持倉中今日陽線高點(${high_p:.2f})創15日新高，但市場溫度({temp_val:.1f})未創4日新高，屬動能背離強弩之末，全數清倉離場"
+                rsn = f"模式B持倉中今日陽線高點(${high_p:.2f})創15日新高，但市場溫度({temp_val:.1f})未創4日新高且低於4日最高溫({temp_4d_max:.1f})2度以上({temp_4d_max - temp_val:.1f}度)，屬動能背離強弩之末，全數清倉離場"
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
@@ -1259,7 +1259,7 @@ with tab2:
                         ret_3m = ((curr_close - prev_3m_close) / prev_3m_close * 100.0) if not np.isnan(prev_3m_close) else np.nan
 
                         prev_1y_close = df_calc['Close'].iloc[latest_idx - 240] if latest_idx >= 240 else np.nan
-                        ret_1y = ((curr_close - prev_1y_close) / prev_1y_close * 100.0) if not np.isnan(prev_1y_close) else np.nan
+                        ret_1y = ((curr_close - prev_1y_close) / prev_1y_close * 100.0) if not np.isnan(ret_1y) else np.nan
 
                         setup_status, alert_msg, diag_desc = TechnicalAnalysisEngine.analyze_daily_radar(df_calc)
 
