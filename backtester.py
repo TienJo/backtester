@@ -384,7 +384,7 @@ class TechnicalAnalysisEngine:
         df['Reason_20D'] = trend_reason_20d
 
         # ----------------------------------------------------
-        # 核心策略回測邏輯 (模式 B 修正為即時建倉)
+        # 核心策略回測邏輯 (修正模式 A 清倉：靠近MA20陽線無法突破且回踩5日線)
         # ----------------------------------------------------
         action_list = []
         reason_list = []
@@ -404,7 +404,7 @@ class TechnicalAnalysisEngine:
         mode_c_reduce_cooldown_until = -999
 
         # 模式 A 專屬追蹤狀態
-        mode_a_approached_ma20 = False
+        mode_a_failed_breakout_ma20 = False
         mode_a_reentry_pending = False
         mode_a_min_low_since_entry = 999999.0
 
@@ -505,20 +505,18 @@ class TechnicalAnalysisEngine:
 
             days_since_entry = i - entry_index
 
-            # 更新模式 A 持倉期間最低價與逼近 MA20 狀態
+            # 更新模式 A 持倉期間最低價，以及判定是否出現「靠近 MA20 的陽線且收盤價無法突破 MA20」
             if in_position and entry_mode == "A":
                 mode_a_min_low_since_entry = min(mode_a_min_low_since_entry, low_p)
-                if high_p >= m20 * 0.98:
-                    mode_a_approached_ma20 = True
+                is_bull_k_near_ma20 = (close_p > open_p) and (high_p >= m20 * 0.98) and (close_p < m20)
+                if is_bull_k_near_ma20:
+                    mode_a_failed_breakout_ma20 = True
 
-            # 模式 A 清倉：靠近 MA20 後踩 MA10，且前面幾天無陽線收在 MA20 上
-            mode_a_ma20_ma10_exit = False
-            if in_position and entry_mode == "A" and mode_a_approached_ma20:
-                if low_p <= m10:
-                    sub_df = df.iloc[entry_index:i+1]
-                    has_bull_above_ma20 = ((sub_df['Close'] > sub_df['Open']) & (sub_df['Close'] > sub_df['MA20'])).any()
-                    if not has_bull_above_ma20:
-                        mode_a_ma20_ma10_exit = True
+            # 模式 A 清倉：先前靠近 MA20 的陽線無法突破，且後續回踩 5 日線 (Low <= MA5)
+            mode_a_ma20_ma5_exit = False
+            if in_position and entry_mode == "A" and mode_a_failed_breakout_ma20:
+                if low_p <= m5:
+                    mode_a_ma20_ma5_exit = True
 
             # 清倉 2: 模式 A 虛高放棄建倉
             mode_a_fake_high_exit = (entry_mode == "A") and (temp_val > 80.0) and (close_p < entry_price * 1.03)
@@ -595,7 +593,7 @@ class TechnicalAnalysisEngine:
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
-                mode_a_approached_ma20 = False
+                mode_a_failed_breakout_ma20 = False
 
             elif mode_b_exhaustion_exit and in_position:
                 act = "🛑 模式B強弩之末清倉"
@@ -604,13 +602,13 @@ class TechnicalAnalysisEngine:
                 position_ratio = 0.0
                 entry_mode = ""
 
-            elif mode_a_ma20_ma10_exit and in_position:
-                act = "🛑 模式A靠近MA20無力突破清倉"
-                rsn = f"模式A建倉後上攻靠近MA20(${m20:.2f})，但未能以陽線實體站上MA20，今日回踩10日線(${m10:.2f})，判定反彈受阻清倉，並等待觸碰布林下軌創新低重進"
+            elif mode_a_ma20_ma5_exit and in_position:
+                act = "🛑 模式A靠近MA20突破失敗+回踩5日線清倉"
+                rsn = f"模式A建倉後陽線靠近MA20(${m20:.2f})無法收突破，今日回踩5日線(${m5:.2f})，判定反彈力竭全數清倉，並等待觸碰布林下軌創新低重進"
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
-                mode_a_approached_ma20 = False
+                mode_a_failed_breakout_ma20 = False
                 mode_a_reentry_pending = True
 
             elif mode_c_overheat_exit and in_position:
@@ -626,7 +624,7 @@ class TechnicalAnalysisEngine:
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
-                mode_a_approached_ma20 = False
+                mode_a_failed_breakout_ma20 = False
 
             elif mode_a_weak_death_exit and in_position:
                 act = "🛑 模式A弱死亡清倉"
@@ -634,7 +632,7 @@ class TechnicalAnalysisEngine:
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
-                mode_a_approached_ma20 = False
+                mode_a_failed_breakout_ma20 = False
 
             elif mode_b_exit_near_high and in_position:
                 act = "🛑 模式B高位獲利清倉"
@@ -695,7 +693,7 @@ class TechnicalAnalysisEngine:
                     in_position = True
                     position_ratio = 0.5
                     entry_mode = "A"
-                    mode_a_approached_ma20 = False
+                    mode_a_failed_breakout_ma20 = False
                     mode_a_reentry_pending = False
                     mode_a_min_low_since_entry = low_p
                 else:
@@ -717,11 +715,11 @@ class TechnicalAnalysisEngine:
                     in_position = True
                     position_ratio = 0.5
                     entry_mode = "A"
-                    mode_a_approached_ma20 = False
+                    mode_a_failed_breakout_ma20 = False
                     mode_a_reentry_pending = False
                     mode_a_min_low_since_entry = low_p
 
-                # 試驗模式 B (即時建倉，不需順延隔天)
+                # 試驗模式 B (即時建倉)
                 elif mode_b_buy_signal:
                     if cond_bear_or_underwater:
                         act = "🚫 模式B被禁用(熊市/MACD水下)"
@@ -1066,7 +1064,7 @@ with tab1:
                         act_text = latest['Advice_Action']
                         rsn_text = latest['Advice_Reason']
                         
-                        if "100%清倉" in act_text or "離場" in act_text or "停損" in act_text or "過熱清倉" in act_text or "無力突破清倉" in act_text or "強弩之末" in act_text:
+                        if "100%清倉" in act_text or "離場" in act_text or "停損" in act_text or "過熱清倉" in act_text or "清倉" in act_text or "強弩之末" in act_text:
                             st.error(f"**【操作建議】{act_text}** — {rsn_text}")
                         elif "被禁用" in act_text or "否決" in act_text or "減倉" in act_text or "取消" in act_text or "等待觸軌" in act_text:
                             st.warning(f"**【操作建議】{act_text}** — {rsn_text}")
