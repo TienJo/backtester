@@ -280,7 +280,7 @@ class TechnicalAnalysisEngine:
         
         df['BB_Upper_5D_Diff'] = df['BB_Upper'].diff(5)
         df['MA20_Diff_1D'] = df['MA20'].diff(1)
-        df['MA20_Diff_5D'] = df['MA20'].diff(5)  # 新增：MA20 近 5 日變化量
+        df['MA20_Diff_5D'] = df['MA20'].diff(5)
 
         # 2. 量能與量比
         df['Vol_MA5'] = df['Volume'].rolling(5).mean()
@@ -385,10 +385,11 @@ class TechnicalAnalysisEngine:
         df['Reason_20D'] = trend_reason_20d
 
         # ----------------------------------------------------
-        # 核心策略回測邏輯 (包含模式 B/C MA20 5日趨勢向上規則)
+        # 核心策略回測邏輯 (含部位比率紀錄以計算收益)
         # ----------------------------------------------------
         action_list = []
         reason_list = []
+        pos_ratio_list = []
 
         sub_start_dt = pd.to_datetime(display_start_date) if display_start_date else df.index[0]
 
@@ -402,7 +403,6 @@ class TechnicalAnalysisEngine:
         entry_temp = 0.0
         entry_rsi = 0.0
         
-        # 模式 A 狀態變數
         mode_a_ma20_fail_flag = False
         mode_a_search_new_low = False
         mode_a_search_start_idx = -999
@@ -422,11 +422,13 @@ class TechnicalAnalysisEngine:
                 entry_mode = ""
                 action_list.append("區間前(不交易)")
                 reason_list.append("尚未進入設定的回測觀察時間區間")
+                pos_ratio_list.append(0.0)
                 continue
 
             if i < 20:
                 action_list.append("資料載入中")
                 reason_list.append("計算指標所需日數不足(至少需20日)")
+                pos_ratio_list.append(0.0)
                 continue
 
             close_p = df['Close'].iloc[i]
@@ -439,7 +441,7 @@ class TechnicalAnalysisEngine:
             m20 = df['MA20'].iloc[i]
             m60 = df['MA60'].iloc[i]
             m20_diff = df['MA20_Diff_1D'].iloc[i]
-            m20_diff5 = df['MA20_Diff_5D'].iloc[i] # 取得 MA20 5日變化量
+            m20_diff5 = df['MA20_Diff_5D'].iloc[i]
 
             bb_u = df['BB_Upper'].iloc[i]
             bb_l = df['BB_Lower'].iloc[i]
@@ -476,8 +478,6 @@ class TechnicalAnalysisEngine:
             cond_weak_hook = temp_ma10_declining and (temp_val < 50.0)
 
             cd_buy_active = (i - last_buy_index) < 5
-            
-            # 共用條件：MA20 的 5日趨勢向上
             cond_ma20_up_5d = m20_diff5 > 0
 
             # ----------------------------------------------------
@@ -487,7 +487,7 @@ class TechnicalAnalysisEngine:
             rsi_recent_oversold = (df['RSI14'].iloc[max(0, i-4):i+1] < 30.0).any()
             mode_a_buy_signal = rsi_recent_oversold and (rsi_diff_1 >= 8.0)
 
-            # 模式 B: 強勢回檔再發動 (需 MA20 5日趨勢向上)
+            # 模式 B: 強勢回檔再發動
             cond_b_env = ((m20 > m60) or (dif > 0)) and (close_p > m60) and (dif > 0)
             cond_b_rsi = (40.0 <= prev_rsi <= 50.0) and (rsi_diff_1 > 0)
             touched_ma20_recent = (df['Low'].iloc[max(0, i-1):i+1] <= df['MA20'].iloc[max(0, i-1):i+1] * 1.015).any()
@@ -497,7 +497,7 @@ class TechnicalAnalysisEngine:
             )
             mode_b_buy_signal = cond_b_env and cond_b_rsi and cond_b_price
 
-            # 模式 C: 平台突破 (需 MA20 5日趨勢向上)
+            # 模式 C: 平台突破
             close_15d_max = df['Close'].iloc[max(0, i-14):i].max() if i >= 15 else df['Close'].iloc[:i].max()
             cond_c_ma_align = (close_p > m20) and (m20 > m60) and cond_ma20_up_5d
             cond_c_new_high = close_p > close_15d_max
@@ -553,7 +553,7 @@ class TechnicalAnalysisEngine:
             mode_c_reduce_trigger = (entry_mode == "C") and (position_ratio == 1.0) and (temp_drop_3d > 20.0)
 
             # ----------------------------------------------------
-            # 邏輯判定順序 (清倉 > 減倉 > T+1建倉 > 新低點重新建倉 > 新訊號觸發)
+            # 邏輯判定順序
             # ----------------------------------------------------
             act = "觀望待變"
             rsn = "指標未符合任何建倉或調整條件"
@@ -653,7 +653,7 @@ class TechnicalAnalysisEngine:
                     entry_mode = "B"
                     mode_b_pending = False
 
-            # 4. 加倉機制檢測 (市場起立:準備起飛)
+            # 4. 加倉機制檢測
             elif (position_ratio == 0.5) and (close_p > m20) and (bb_u_diff5 > 0):
                 if i < mode_c_reduce_cooldown_until:
                     act = "🚫 暫停加倉(減倉冷卻期中)"
@@ -690,7 +690,6 @@ class TechnicalAnalysisEngine:
 
             # 6. 新進場觸發檢測
             elif not in_position and not cd_buy_active:
-                # 試驗模式 A
                 if mode_a_buy_signal:
                     act = "🟢 模式A:超賣強彈(建半倉)"
                     rsn = f"【模式A抄底】近5日出現RSI<30，當日RSI大漲{rsi_diff_1:.1f}點(>=8)，建立50%半倉"
@@ -705,7 +704,6 @@ class TechnicalAnalysisEngine:
                     entry_mode = "A"
                     mode_a_ma20_fail_flag = False
 
-                # 試驗模式 B (須經由否決機制篩選，並於隔日建倉)
                 elif mode_b_buy_signal:
                     if cond_bear_or_underwater:
                         act = "🚫 模式B被禁用(熊市/MACD水下)"
@@ -722,7 +720,6 @@ class TechnicalAnalysisEngine:
                         mode_b_pending = True
                         mode_b_pending_low = low_p
 
-                # 試驗模式 C (不受高檔背離限制，但仍受熊市/水下限制)
                 elif mode_c_buy_signal:
                     if cond_bear_or_underwater:
                         act = "🚫 模式C被禁用(熊市/MACD水下)"
@@ -753,14 +750,16 @@ class TechnicalAnalysisEngine:
 
             action_list.append(act)
             reason_list.append(rsn)
+            pos_ratio_list.append(position_ratio)
 
         df['Advice_Action'] = action_list
         df['Advice_Reason'] = reason_list
+        df['Position_Ratio'] = pos_ratio_list
 
         return df
 
     # ----------------------------------------------------
-    # ⚡ 專屬雷達診斷引擎：分析當日技術狀態與警告訊息
+    # ⚡ 專屬雷達診斷引擎
     # ----------------------------------------------------
     @staticmethod
     def analyze_daily_radar(df: pd.DataFrame) -> tuple[str, str, str]:
@@ -1010,7 +1009,7 @@ with tab1:
                     st.error("歷史數據不足，無法繪製K線圖。請確認代碼或重新選擇區間。")
                 else:
                     df_calc = TechnicalAnalysisEngine.calculate_indicators(df_raw, display_start_date=start_str)
-                    df_sub = df_calc.loc[start_str:end_str]
+                    df_sub = df_calc.loc[start_str:end_str].copy()
 
                     if df_sub.empty:
                         st.warning("選定日期區間內沒有可用的交易日行情數據。")
@@ -1035,6 +1034,38 @@ with tab1:
                         with p_col2:
                             st.caption(f"⏱️ 系統數據最後計算更新時間：`{now_str}`")
                             st.caption(f"📡 行情數據來源：`{src_bt}`")
+
+                        # ----------------------------------------------------
+                        # 📈 新增：選定區間收益百分比試算與對比模組
+                        # ----------------------------------------------------
+                        st.markdown("---")
+                        st.markdown(f"#### 💰 選定區間績效試算報告 ({start_str} ～ {end_str})")
+                        
+                        # 計算單純買入持有 (Buy & Hold) 收益率
+                        bh_start_price = df_sub['Close'].iloc[0]
+                        bh_end_price = df_sub['Close'].iloc[-1]
+                        bh_return_pct = ((bh_end_price - bh_start_price) / bh_start_price) * 100.0
+
+                        # 計算策略動態持倉收益率與淨值曲線
+                        daily_pct_change = df_sub['Close'].pct_change().fillna(0.0)
+                        # 前日持倉比率影響今日收益
+                        shift_pos_ratio = df_sub['Position_Ratio'].shift(1).fillna(0.0)
+                        strategy_daily_ret = daily_pct_change * shift_pos_ratio
+                        
+                        strategy_cum_equity = (1.0 + strategy_daily_ret).cumprod()
+                        strategy_total_return_pct = (strategy_cum_equity.iloc[-1] - 1.0) * 100.0
+                        
+                        bh_cum_equity = (1.0 + daily_pct_change).cumprod()
+                        alpha_pct = strategy_total_return_pct - bh_return_pct
+
+                        df_sub['Strategy_Equity'] = strategy_cum_equity
+                        df_sub['BH_Equity'] = bh_cum_equity
+
+                        k_col1, k_col2, k_col3, k_col4 = st.columns(4)
+                        k_col1.metric("🎯 策略累積收益率", f"{strategy_total_return_pct:+.2f}%")
+                        k_col2.metric("📊 標的買入持有收益率", f"{bh_return_pct:+.2f}%")
+                        k_col3.metric("🚀 策略超額報酬 (Alpha)", f"{alpha_pct:+.2f}%", delta_color="normal")
+                        k_col4.metric("🛡️ 區間最高持倉部位", f"{int(df_sub['Position_Ratio'].max() * 100)}%")
 
                         st.markdown("---")
                         st.markdown("#### 💡 當前最新策略操作建議與動態提醒")
@@ -1100,21 +1131,23 @@ with tab1:
                             st.info(f"**📌 20日中期格局原因：** {latest['Reason_20D']}")
 
                         st.markdown("---")
-                        st.markdown("#### 🎯 K線(含均線MA5/10/20/60與布林通道)、市場溫度、RSI 與 MACD 四圖對照")
+                        st.markdown("#### 🎯 K線、市場溫度、RSI、MACD 與 策略績效淨值曲線 五圖對照")
 
                         fig = make_subplots(
-                            rows=4, cols=1, 
+                            rows=5, cols=1, 
                             shared_xaxes=True, 
-                            vertical_spacing=0.03, 
-                            row_heights=[0.4, 0.2, 0.2, 0.2],
+                            vertical_spacing=0.025, 
+                            row_heights=[0.35, 0.15, 0.15, 0.15, 0.2],
                             subplot_titles=(
                                 f"{bt_symbol} K線、MA5/10/20/60 均線與布林通道", 
                                 "動態市場溫度 T (0-100)", 
                                 "RSI(14) 指標", 
-                                "MACD 指標 (DIF, DEA, 柱狀圖)"
+                                "MACD 指標 (DIF, DEA, 柱狀圖)",
+                                "累積收益率淨值曲線對比 (初始基準 = 1.0)"
                             )
                         )
 
+                        # Row 1: K線
                         fig.add_trace(go.Candlestick(
                             x=df_sub.index,
                             open=df_sub['Open'], high=df_sub['High'],
@@ -1131,16 +1164,19 @@ with tab1:
                         fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['BB_Upper'], mode='lines', name='布林上軌', line=dict(color='#AB47BC', width=1, dash='dash')), row=1, col=1)
                         fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['BB_Lower'], mode='lines', name='布林下軌', line=dict(color='#AB47BC', width=1, dash='dash')), row=1, col=1)
 
+                        # Row 2: 溫度
                         fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Temperature'], mode='lines', name='溫度 T', line=dict(color='#FF3D00', width=2)), row=2, col=1)
                         fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Temperature_MA10'], mode='lines', name='溫度 T 10日均線', line=dict(color='#FFA726', width=1, dash='dot')), row=2, col=1)
                         fig.add_hline(y=75, line_dash="dash", line_color="#FF1744", row=2, col=1)
                         fig.add_hline(y=50, line_dash="dash", line_color="#00E676", row=2, col=1)
 
+                        # Row 3: RSI
                         fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['RSI14'], mode='lines', name='RSI(14)', line=dict(color='#00E5FF', width=1.5)), row=3, col=1)
                         fig.add_hline(y=70, line_dash="dot", line_color="#FF8A80", row=3, col=1)
                         fig.add_hline(y=50, line_dash="dash", line_color="#CCCCCC", row=3, col=1)
                         fig.add_hline(y=30, line_dash="dot", line_color="#B9F6CA", row=3, col=1)
 
+                        # Row 4: MACD
                         fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['DIF'], mode='lines', name='DIF (快線)', line=dict(color='#2962FF', width=1.2)), row=4, col=1)
                         fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['DEA'], mode='lines', name='DEA (慢線)', line=dict(color='#FF6D00', width=1.2)), row=4, col=1)
                         
@@ -1148,11 +1184,16 @@ with tab1:
                         fig.add_trace(go.Bar(x=df_sub.index, y=df_sub['MACD_Hist'], name='MACD 柱狀圖', marker_color=macd_colors), row=4, col=1)
                         fig.add_hline(y=0, line_dash="solid", line_color="#9E9E9E", row=4, col=1)
 
+                        # Row 5: 淨值曲線
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Strategy_Equity'], mode='lines', name='策略動態淨值', line=dict(color='#2E7D32', width=2)), row=5, col=1)
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['BH_Equity'], mode='lines', name='買入持有淨值', line=dict(color='#757575', width=1.5, dash='dot')), row=5, col=1)
+                        fig.add_hline(y=1.0, line_dash="solid", line_color="#E0E0E0", row=5, col=1)
+
                         fig.update_layout(
                             xaxis_rangeslider_visible=False,
                             hovermode="x unified",
                             template="plotly_white",
-                            height=850
+                            height=1000
                         )
                         st.plotly_chart(fig, use_container_width=True)
 
@@ -1163,8 +1204,9 @@ with tab1:
                         show_df['市場溫度 T'] = show_df['Temperature'].round(1)
                         show_df['RSI(14)'] = show_df['RSI14'].round(2)
                         show_df['MACD柱狀'] = show_df['MACD_Hist'].round(3)
+                        show_df['持倉比率'] = (show_df['Position_Ratio'] * 100).astype(int).astype(str) + "%"
                         
-                        show_cols = ["Open", "High", "Low", "Close", "Volume", "市場溫度 T", "RSI(14)", "MACD柱狀", "Reason_5D", "Reason_20D", "Advice_Action", "Advice_Reason"]
+                        show_cols = ["Open", "High", "Low", "Close", "Volume", "持倉比率", "市場溫度 T", "RSI(14)", "MACD柱狀", "Reason_5D", "Reason_20D", "Advice_Action", "Advice_Reason"]
                         rename_dict = {
                             "Reason_5D": "5日格局原因",
                             "Reason_20D": "20日格局原因",
