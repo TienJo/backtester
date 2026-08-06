@@ -384,7 +384,7 @@ class TechnicalAnalysisEngine:
         df['Reason_20D'] = trend_reason_20d
 
         # ----------------------------------------------------
-        # 核心策略回測邏輯 (含更新之標準趨勢轉空清倉條件)
+        # 核心策略回測邏輯 (含模式 B 順延建倉規則)
         # ----------------------------------------------------
         action_list = []
         reason_list = []
@@ -402,7 +402,9 @@ class TechnicalAnalysisEngine:
         entry_rsi = 0.0
         
         mode_b_pending = False
+        mode_b_pending_close = 0.0
         mode_b_pending_low = 0.0
+        mode_b_pending_days = 0
         
         mode_c_reduce_cooldown_until = -999
 
@@ -501,7 +503,7 @@ class TechnicalAnalysisEngine:
             # ----------------------------------------------------
             # 出場與清倉機制條件
             # ----------------------------------------------------
-            # 清倉 1 (更新): MACD死叉 + 跌破MA20 + 前4天MACD平均 > 5
+            # 清倉 1: MACD死叉 + 跌破MA20 + 前4天MACD平均 > 5
             macd_dc = (dif < dea) and (prev_dif >= prev_dea)
             prev_4d_macd_avg = df['MACD_Hist'].iloc[max(0, i-4):i].mean() if i >= 4 else 0.0
             macd_dc_and_below_ma20 = macd_dc and (close_p < m20) and (prev_4d_macd_avg > 5.0)
@@ -586,7 +588,7 @@ class TechnicalAnalysisEngine:
             )
 
             # ----------------------------------------------------
-            # 邏輯判定順序 (清倉 > 減倉 > T+1建倉 > 模式A觸軌重建 > 新訊號觸發)
+            # 邏輯判定順序 (清倉 > 減倉 > T+1/T+2建倉 > 模式A觸軌重建 > 新訊號觸發)
             # ----------------------------------------------------
             act = "觀望待變"
             rsn = "指標未符合任何建倉或調整條件"
@@ -674,7 +676,7 @@ class TechnicalAnalysisEngine:
                 position_ratio = 0.5
                 mode_c_reduce_cooldown_until = i + 3
 
-            # 3. 處理模式 B 之 T+1 延遲建倉
+            # 3. 處理模式 B 之 T+1 / T+2 建倉與順延邏輯
             elif mode_b_pending:
                 if cond_bear_or_underwater:
                     act = "🚫 模式B建倉取消(市場環境轉壞)"
@@ -683,22 +685,46 @@ class TechnicalAnalysisEngine:
                 elif cond_high_divergence:
                     act = "⚠️ 模式B建倉取消(高檔背離)"
                     rsn = "預備執行模式B建倉當日觸發高檔極致背離，取消建倉"
+                    mode_b_pending = False
                 elif cond_weak_hook:
                     act = "⚠️ 模式B建倉取消(弱勢勾頭)"
                     rsn = "預備執行模式B建倉當日觸發弱勢勾頭否決，取消建倉"
-                else:
-                    act = "🟢 模式B:強勢回檔(隔日執行建半倉)"
-                    rsn = f"前一交易日滿足【模式B】條件，今日情緒過後正式執行買入50%半倉"
-                    last_buy_index = i
-                    entry_index = i
-                    entry_price = close_p
-                    entry_low = mode_b_pending_low
-                    entry_temp = temp_val
-                    entry_rsi = rsi
-                    in_position = True
-                    position_ratio = 0.5
-                    entry_mode = "B"
                     mode_b_pending = False
+                else:
+                    if mode_b_pending_days == 0:
+                        # T+1 日判定
+                        if close_p > mode_b_pending_close:
+                            act = "🟡 模式B建倉順延(T+1價高於T日)"
+                            rsn = f"模式B條件於T日成立，因T+1日收盤價(${close_p:.2f})高於T日收盤價(${mode_b_pending_close:.2f})，建倉操作順延至T+2日"
+                            mode_b_pending_days = 1
+                            mode_b_pending_low = min(mode_b_pending_low, low_p)
+                        else:
+                            act = "🟢 模式B:強勢回檔(T+1日執行建半倉)"
+                            rsn = f"前一交易日(T日)滿足【模式B】條件，且T+1日收盤未高於T日收盤，正式執行買入50%半倉"
+                            last_buy_index = i
+                            entry_index = i
+                            entry_price = close_p
+                            entry_low = min(mode_b_pending_low, low_p)
+                            entry_temp = temp_val
+                            entry_rsi = rsi
+                            in_position = True
+                            position_ratio = 0.5
+                            entry_mode = "B"
+                            mode_b_pending = False
+                    else:
+                        # T+2 日正式執行建倉
+                        act = "🟢 模式B:強勢回檔(順延至T+2日執行建半倉)"
+                        rsn = f"T日滿足【模式B】條件，因T+1日收盤價高於T日收盤價而順延，今日(T+2日)正式執行買入50%半倉"
+                        last_buy_index = i
+                        entry_index = i
+                        entry_price = close_p
+                        entry_low = min(mode_b_pending_low, low_p)
+                        entry_temp = temp_val
+                        entry_rsi = rsi
+                        in_position = True
+                        position_ratio = 0.5
+                        entry_mode = "B"
+                        mode_b_pending = False
 
             # 4. 加倉機制檢測 (市場起立:準備起飛)
             elif (position_ratio in [0.2, 0.5]) and (close_p > m20) and (bb_u_diff5 > 0):
@@ -764,9 +790,11 @@ class TechnicalAnalysisEngine:
                         rsn = "市場溫度10日線下滑且溫度<50度，屬動能失血，拒絕開倉"
                     else:
                         act = "🟡 模式B條件成立(等待隔日建倉)"
-                        rsn = f"【模式B強勢回檔】條件成立！市場情緒過高，將於下一交易日執行建倉"
+                        rsn = f"【模式B強勢回檔】條件成立(T日)！將於T+1日評估是否建倉或順延"
                         mode_b_pending = True
+                        mode_b_pending_close = close_p
                         mode_b_pending_low = low_p
+                        mode_b_pending_days = 0
 
                 # 試驗模式 C
                 elif mode_c_buy_signal:
@@ -1091,7 +1119,7 @@ with tab1:
                         
                         if "100%清倉" in act_text or "離場" in act_text or "停損" in act_text or "過熱清倉" in act_text or "無力突破清倉" in act_text or "強弩之末" in act_text:
                             st.error(f"**【操作建議】{act_text}** — {rsn_text}")
-                        elif "被禁用" in act_text or "否決" in act_text or "減倉" in act_text or "取消" in act_text or "等待觸軌" in act_text:
+                        elif "被禁用" in act_text or "否決" in act_text or "減倉" in act_text or "取消" in act_text or "等待觸軌" in act_text or "順延" in act_text:
                             st.warning(f"**【操作建議】{act_text}** — {rsn_text}")
                         elif "模式" in act_text or "建倉" in act_text or "補滿倉" in act_text or "續抱" in act_text:
                             st.success(f"**【操作建議】{act_text}** — {rsn_text}")
