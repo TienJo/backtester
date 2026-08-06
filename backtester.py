@@ -384,7 +384,7 @@ class TechnicalAnalysisEngine:
         df['Reason_20D'] = trend_reason_20d
 
         # ----------------------------------------------------
-        # 核心策略回測邏輯 (含模式 A 均線/布林新規則與模式 C 溫度<85)
+        # 核心策略回測邏輯 (含模式 B 新增強弩之末清倉條件)
         # ----------------------------------------------------
         action_list = []
         reason_list = []
@@ -512,7 +512,7 @@ class TechnicalAnalysisEngine:
                 if high_p >= m20 * 0.98:
                     mode_a_approached_ma20 = True
 
-            # 模式 A 新規：靠近 MA20 後踩 MA10，且前面幾天無陽線收在 MA20 上則清倉
+            # 模式 A 清倉：靠近 MA20 後踩 MA10，且前面幾天無陽線收在 MA20 上
             mode_a_ma20_ma10_exit = False
             if in_position and entry_mode == "A" and mode_a_approached_ma20:
                 if low_p <= m10:
@@ -539,11 +539,25 @@ class TechnicalAnalysisEngine:
             is_near_20d_high = close_p >= (close_20d_max * 0.98)
             mode_b_exit_near_high = (entry_mode == "B") and is_near_20d_high and (prev_temp_val > 80.0) and macd_dc_and_below_ma20
 
+            # 新增清倉 3.5: 模式 B 強弩之末清倉 (陽線最高點創新高，但溫度不是4日內新高)
+            is_bull_k = close_p > open_p
+            high_15d_max = df['High'].iloc[max(0, i-14):i].max() if i >= 15 else df['High'].iloc[:i].max()
+            is_high_new_high = high_p >= high_15d_max
+            temp_4d_max = df['Temperature'].iloc[max(0, i-3):i].max() if i >= 3 else df['Temperature'].iloc[:i].max()
+            temp_not_4d_high = temp_val < temp_4d_max
+
+            mode_b_exhaustion_exit = (
+                in_position and 
+                (entry_mode == "B") and 
+                is_bull_k and 
+                is_high_new_high and 
+                temp_not_4d_high
+            )
+
             # 清倉 4: 模式 C 動能衰竭清倉
             mode_c_macd_exhaust_exit = (entry_mode == "C") and (dif > 0) and (hist < 10.0) and ((prev_hist - hist) >= 10.0)
 
             # 清倉 4.5: 模式 C 極致過熱清倉
-            is_bull_k = close_p > open_p
             mode_c_overheat_exit = (
                 (entry_mode == "C") and 
                 (temp_val > 88.0) and 
@@ -584,6 +598,13 @@ class TechnicalAnalysisEngine:
                 entry_mode = ""
                 mode_b_pending = False
                 mode_a_approached_ma20 = False
+
+            elif mode_b_exhaustion_exit and in_position:
+                act = "🛑 模式B強弩之末清倉"
+                rsn = f"模式B持倉中今日陽線高點(${high_p:.2f})創15日新高，但市場溫度({temp_val:.1f})未創4日新高，屬動能背離強弩之末，全數清倉離場"
+                in_position = False
+                position_ratio = 0.0
+                entry_mode = ""
 
             elif mode_a_ma20_ma10_exit and in_position:
                 act = "🛑 模式A靠近MA20無力突破清倉"
@@ -1064,7 +1085,7 @@ with tab1:
                         act_text = latest['Advice_Action']
                         rsn_text = latest['Advice_Reason']
                         
-                        if "100%清倉" in act_text or "離場" in act_text or "停損" in act_text or "極致過熱清倉" in act_text or "無力突破清倉" in act_text:
+                        if "100%清倉" in act_text or "離場" in act_text or "停損" in act_text or "過熱清倉" in act_text or "無力突破清倉" in act_text or "強弩之末" in act_text:
                             st.error(f"**【操作建議】{act_text}** — {rsn_text}")
                         elif "被禁用" in act_text or "否決" in act_text or "減倉" in act_text or "取消" in act_text or "等待觸軌" in act_text:
                             st.warning(f"**【操作建議】{act_text}** — {rsn_text}")
