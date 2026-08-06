@@ -384,7 +384,7 @@ class TechnicalAnalysisEngine:
         df['Reason_20D'] = trend_reason_20d
 
         # ----------------------------------------------------
-        # 核心策略回測邏輯（包含最新改版規則）
+        # 核心策略回測邏輯
         # ----------------------------------------------------
         action_list = []
         reason_list = []
@@ -403,16 +403,16 @@ class TechnicalAnalysisEngine:
         
         mode_c_reduce_cooldown_until = -999
 
-        # 模式 A 狀態
+        # 模式 A 專屬追蹤狀態
         mode_a_failed_breakout_ma20 = False
         mode_a_reentry_pending = False
         mode_a_min_low_since_entry = 999999.0
 
-        # 模式 B 兩階段建倉與減倉狀態
+        # 模式 B 專屬狀態
         mode_b_stage = 0 
         mode_b_reduced_50 = False
 
-        # 模式 C / C2 狀態
+        # 模式 C / C2 專屬追蹤狀態
         mode_c2_reentry_pending = False
         mode_c2_min_macd = 999999.0
         mode_c2_min_rsi = 999999.0
@@ -465,7 +465,26 @@ class TechnicalAnalysisEngine:
             temp_std20 = df['Temperature_Std20'].iloc[i]
 
             # ----------------------------------------------------
-            # 基礎濾網與限制
+            # 1. 計算進場訊號 (在此先計算避免名稱未定義錯誤)
+            # ----------------------------------------------------
+            rsi_recent_oversold = (df['RSI14'].iloc[max(0, i-4):i+1] < 30.0).any()
+            mode_a_buy_signal = rsi_recent_oversold and (rsi_diff_1 >= 8.0)
+
+            cond_b_env = ((m20 > m60) or (dif > 0)) and (close_p > m60) and (dif > 0)
+            cond_b_rsi = (40.0 <= prev_rsi <= 50.0) and (rsi_diff_1 > 0)
+            touched_ma20_recent = (df['Low'].iloc[max(0, i-1):i+1] <= df['MA20'].iloc[max(0, i-1):i+1] * 1.015).any()
+            mode_b_buy_signal = cond_b_env and cond_b_rsi and touched_ma20_recent
+
+            close_15d_max = df['Close'].iloc[max(0, i-14):i].max() if i >= 15 else df['Close'].iloc[:i].max()
+            high_15d_max = df['High'].iloc[max(0, i-14):i].max() if i >= 15 else df['High'].iloc[:i].max()
+            cond_c_ma_align = (close_p > m20) and (m20 > m60)
+            cond_c_new_high = close_p > close_15d_max
+            cond_c_long_red = (close_p > open_p) and (close_p >= bb_u * 0.995)
+            cond_c_temp_limit = temp_val < 85.0
+            mode_c_buy_signal = cond_c_ma_align and cond_c_new_high and cond_c_long_red and cond_c_temp_limit
+
+            # ----------------------------------------------------
+            # 2. 濾網條件計算
             # ----------------------------------------------------
             is_ma60_down = m60 < df['MA60'].iloc[i-1]
             is_bear_market = is_ma60_down and (close_p < m60)
@@ -479,27 +498,22 @@ class TechnicalAnalysisEngine:
             cond_weak_hook = temp_ma10_declining and (temp_val < 50.0)
 
             cd_buy_active = (i - last_buy_index) < 5
-
             days_since_entry = i - entry_index if in_position else -1
 
             # ----------------------------------------------------
-            # 全局通用清倉機制 (最高優先級)
+            # 3. 各項離場/減倉條件計算
             # ----------------------------------------------------
             # 通用 1: 新高後3日內跌破3天箱體最低點，減半倉
-            high_15d_max = df['High'].iloc[max(0, i-14):i].max() if i >= 15 else df['High'].iloc[:i].max()
             is_new_high_recent = (df['High'].iloc[max(0, i-3):i+1] >= high_15d_max).any()
             box_low_3d = df['Low'].iloc[max(0, i-3):i].min() if i >= 3 else df['Low'].iloc[:i].min()
             gen_new_high_drop_box_reduce = in_position and is_new_high_recent and (close_p < box_low_3d) and (position_ratio > 0.3)
 
-            # 通用 2: MACD死叉 + 跌破MA20 + 快慢線非膠著(前4日DIF-DEA標準差>0.05)
+            # 通用 2: MACD死叉 + 跌破MA20 + 動能非膠著(前4日DIF-DEA標準差>0.05)
             macd_dc = (dif < dea) and (prev_dif >= prev_dea)
             dif_dea_diff_std4 = (df['DIF'].iloc[max(0, i-4):i+1] - df['DEA'].iloc[max(0, i-4):i+1]).std() if i >= 4 else 1.0
             macd_not_flat = dif_dea_diff_std4 > 0.05
             gen_macd_dc_exit = in_position and macd_dc and (close_p < m20) and macd_not_flat
 
-            # ----------------------------------------------------
-            # 各模式專屬離場條件計算
-            # ----------------------------------------------------
             # 【模式 A 離場】
             if in_position and entry_mode == "A":
                 mode_a_min_low_since_entry = min(mode_a_min_low_since_entry, low_p)
@@ -519,19 +533,16 @@ class TechnicalAnalysisEngine:
             )
 
             # 【模式 B 離場/減倉】
-            # B 減倉 A: 動能背離減倉
             temp_4d_max = df['Temperature'].iloc[max(0, i-3):i].max() if i >= 3 else df['Temperature'].iloc[:i].max()
             mode_b_div_reduce = (
                 in_position and (entry_mode == "B") and (close_p > open_p) and (high_p >= high_15d_max) and 
                 (temp_val < temp_4d_max) and (temp_val < (temp_4d_max - 1.5 * temp_std20)) and (position_ratio > 0.3)
             )
-            # B 減倉 B: 高位鈍化減倉 (第一步：死叉先出50%)
             close_20d_max = df['Close'].iloc[max(0, i-19):i+1].max()
             is_near_20d_high = close_p >= (close_20d_max * 0.98)
             mode_b_high_flat_reduce = (
                 in_position and (entry_mode == "B") and is_near_20d_high and (prev_temp_val > 80.0) and macd_dc and (position_ratio > 0.3)
             )
-            # B 停損: 第6個交易日（i-entry_index >= 5）起，跌破建倉日最低價
             mode_b_day6_stop_loss = (
                 in_position and (entry_mode == "B") and (days_since_entry >= 5) and (close_p < entry_low)
             )
@@ -559,7 +570,7 @@ class TechnicalAnalysisEngine:
                 entry_mode = "C"
 
             # ----------------------------------------------------
-            # 決策流程 (清倉 > 減倉 > 加碼/建倉)
+            # 4. 決策流程 (清倉 > 減倉 > 加碼/建倉)
             # ----------------------------------------------------
             act = "觀望待變"
             rsn = "指標未符合任何建倉或調整條件"
@@ -567,7 +578,7 @@ class TechnicalAnalysisEngine:
             # 1. 全局清倉
             if gen_macd_dc_exit:
                 act = "🛑 100%清倉(MACD死叉+跌破MA20+動能非膠著)"
-                rsn = f"MACD出現死叉，收盤價(${close_p:.2f})跌破MA20(${m20:.2f})且快慢線具備明顯開口，趨勢轉空全數清倉"
+                rsn = f"MACD死叉、收盤價(${close_p:.2f})跌破MA20(${m20:.2f})且快慢線具備明顯開口，趨勢轉空全數清倉"
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
