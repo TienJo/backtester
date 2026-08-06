@@ -384,7 +384,7 @@ class TechnicalAnalysisEngine:
         df['Reason_20D'] = trend_reason_20d
 
         # ----------------------------------------------------
-        # 核心策略回測邏輯
+        # 核心策略回測邏輯 (含模式 C2 機制)
         # ----------------------------------------------------
         action_list = []
         reason_list = []
@@ -407,6 +407,11 @@ class TechnicalAnalysisEngine:
         mode_a_failed_breakout_ma20 = False
         mode_a_reentry_pending = False
         mode_a_min_low_since_entry = 999999.0
+
+        # 模式 C / C2 專屬追蹤狀態
+        mode_c2_reentry_pending = False
+        mode_c2_min_macd = 999999.0
+        mode_c2_min_rsi = 999999.0
 
         for i in range(len(df)):
             current_date = df.index[i]
@@ -537,7 +542,7 @@ class TechnicalAnalysisEngine:
             is_near_20d_high = close_p >= (close_20d_max * 0.98)
             mode_b_exit_near_high = (entry_mode == "B") and is_near_20d_high and (prev_temp_val > 80.0) and macd_dc_and_below_ma20
 
-            # 清倉 3.5 (修正): 模式 B 強弩之末清倉 (陽線高點創新高，溫度不是4日內新高且低於4日最高溫2度以上)
+            # 清倉 3.5: 模式 B 強弩之末清倉
             is_bull_k = close_p > open_p
             high_15d_max = df['High'].iloc[max(0, i-14):i].max() if i >= 15 else df['High'].iloc[:i].max()
             is_high_new_high = high_p >= high_15d_max
@@ -552,10 +557,10 @@ class TechnicalAnalysisEngine:
                 temp_not_4d_high_and_lower_2deg
             )
 
-            # 清倉 4: 模式 C 動能衰竭清倉
+            # 清倉 4: 模式 C 動能衰竭清倉 (C2 模式下暫停)
             mode_c_macd_exhaust_exit = (entry_mode == "C") and (dif > 0) and (hist < 10.0) and ((prev_hist - hist) >= 10.0)
 
-            # 清倉 4.5: 模式 C 極致過熱清倉
+            # 清倉 4.5: 模式 C 極致過熱清倉 (C2 模式下暫停)
             mode_c_overheat_exit = (
                 (entry_mode == "C") and 
                 (temp_val > 88.0) and 
@@ -564,11 +569,36 @@ class TechnicalAnalysisEngine:
                 (high_p > bb_u * 1.05)
             )
 
-            # 清倉 5: 模式 B/C 三日認錯停損
+            # 新增清倉 4.6: 模式 C 創新高後單日 MACD 驟降清倉 (觸發 C2 建倉預備)
+            macd_drop = prev_hist - hist
+            mode_c_spike_drop_exit = (
+                in_position and 
+                (entry_mode == "C") and 
+                (high_p >= high_15d_max) and 
+                (macd_drop > 6.0) and 
+                (hist < 2.0)
+            )
+
+            # 清倉 5: 模式 B/C 三日認錯停損 (C2 模式下不適用)
             mode_bc_3d_failed = in_position and (entry_mode in ["B", "C"]) and (1 <= days_since_entry <= 3) and (close_p < entry_low)
 
+            # 新增清倉 6: C2 模式專屬 3% 硬停損
+            mode_c2_loss_3pct_exit = in_position and (entry_mode == "C2") and (close_p < entry_price * 0.97)
+
             # ----------------------------------------------------
-            # 減倉機制條件 (模式 C 專屬)
+            # C2 狀態維護與模式切換 logic
+            # ----------------------------------------------------
+            # 更新等待 C2 建倉期間的 MACD 與 RSI 最低值
+            if not in_position and mode_c2_reentry_pending:
+                mode_c2_min_macd = min(mode_c2_min_macd, hist)
+                mode_c2_min_rsi = min(mode_c2_min_rsi, rsi)
+
+            # 當 C2 持倉中且 MACD 重新突破大於 2 時，回歸正常模式 C
+            if in_position and (entry_mode == "C2") and (hist > 2.0):
+                entry_mode = "C"
+
+            # ----------------------------------------------------
+            # 減倉機制條件 (模式 C 專屬，C2 模式下暫停)
             # ----------------------------------------------------
             temp_drop_3d = (df['Temperature'].iloc[max(0, i-2)] - temp_val) if i >= 2 else 0.0
             mode_c_reduce_trigger = (entry_mode == "C") and (position_ratio > 0.2) and (temp_drop_3d > 20.0)
@@ -595,6 +625,23 @@ class TechnicalAnalysisEngine:
                 position_ratio = 0.0
                 entry_mode = ""
                 mode_a_failed_breakout_ma20 = False
+
+            elif mode_c2_loss_3pct_exit and in_position:
+                act = "🛑 模式C2跌破3%停損清倉"
+                rsn = f"C2持倉期間收盤價(${close_p:.2f})跌破建倉價(${entry_price:.2f})之3%停損線(${entry_price*0.97:.2f})，觸發C2專屬停損無條件清倉"
+                in_position = False
+                position_ratio = 0.0
+                entry_mode = ""
+
+            elif mode_c_spike_drop_exit and in_position:
+                act = "🛑 模式C急跌清倉(轉入C2預備狀態)"
+                rsn = f"模式C持倉中創15日新高，但單日MACD暴跌{macd_drop:.2f}(>6)且MACD柱狀({hist:.2f})<2，動能失血清倉，並開啟C2建倉追蹤"
+                in_position = False
+                position_ratio = 0.0
+                entry_mode = ""
+                mode_c2_reentry_pending = True
+                mode_c2_min_macd = hist
+                mode_c2_min_rsi = rsi
 
             elif mode_b_exhaustion_exit and in_position:
                 act = "🛑 模式B強弩之末清倉"
@@ -656,7 +703,7 @@ class TechnicalAnalysisEngine:
                 position_ratio = 0.0
                 entry_mode = ""
 
-            # 2. 模式 C 專屬減倉機制
+            # 2. 模式 C 專屬減倉機制 (C2 模式下不觸發)
             elif mode_c_gain_reduce_trigger:
                 act = "⚠️ 模式C獲利止盈減倉(減至2層倉)"
                 rsn = f"模式C建倉後2日內總收益率達{gain_since_entry*100:.1f}%(>10%)，強制減倉至2層倉(20%)，並鎖定10日內不可加倉"
@@ -669,8 +716,8 @@ class TechnicalAnalysisEngine:
                 position_ratio = 0.5
                 mode_c_reduce_cooldown_until = i + 3
 
-            # 3. 加倉機制檢測 (市場起立:準備起飛)
-            elif (position_ratio in [0.2, 0.5]) and (close_p > m20) and (bb_u_diff5 > 0):
+            # 3. 加碼機制檢測 (市場起立:準備起飛，C2 模式下暫不加碼)
+            elif (position_ratio in [0.2, 0.5]) and (entry_mode != "C2") and (close_p > m20) and (bb_u_diff5 > 0):
                 if i < mode_c_reduce_cooldown_until:
                     act = "🚫 暫停加倉(減倉冷卻期中)"
                     rsn = f"觸發減倉機制，冷卻期內(剩餘{mode_c_reduce_cooldown_until - i}日)禁止加倉"
@@ -680,7 +727,31 @@ class TechnicalAnalysisEngine:
                     last_buy_index = i
                     position_ratio = 1.0
 
-            # 4. 模式 A 觸軌創新低重建檢測
+            # 4. 模式 C2 重新建倉檢測
+            elif not in_position and mode_c2_reentry_pending:
+                # 條件：MACD未再創新低 且 RSI未再創新低，並且出現當日回升訊號
+                macd_not_new_low = hist >= mode_c2_min_macd
+                rsi_not_new_low = rsi >= mode_c2_min_rsi
+                turning_up = (hist > prev_hist) or (close_p > open_p)
+
+                if macd_not_new_low and rsi_not_new_low and turning_up:
+                    act = "🟢 模式C2:止跌重新建倉(建半倉)"
+                    rsn = f"滿足C2建倉條件！MACD({hist:.2f}>={mode_c2_min_macd:.2f})與RSI({rsi:.1f}>={mode_c2_min_rsi:.1f})均未再創新低且止跌，建立50%半倉，並暫停原C模式減清倉條款(改採3%硬停損)"
+                    last_buy_index = i
+                    entry_index = i
+                    entry_price = close_p
+                    entry_low = low_p
+                    entry_temp = temp_val
+                    entry_rsi = rsi
+                    in_position = True
+                    position_ratio = 0.5
+                    entry_mode = "C2"
+                    mode_c2_reentry_pending = False
+                else:
+                    act = "⏳ 模式C2等待止跌訊號"
+                    rsn = f"急跌清倉後觀察中，等待MACD(當前{hist:.2f}/低點{mode_c2_min_macd:.2f})與RSI(當前{rsi:.1f}/低點{mode_c2_min_rsi:.1f})停止創新低"
+
+            # 5. 模式 A 觸軌創新低重建檢測
             elif not in_position and mode_a_reentry_pending:
                 if (low_p <= bb_l) and (low_p < mode_a_min_low_since_entry):
                     act = "🟢 模式A:觸軌創新低(重新建半倉)"
@@ -701,7 +772,7 @@ class TechnicalAnalysisEngine:
                     act = "⏳ 模式A等待觸軌新低"
                     rsn = f"前次模式A無力突破清倉，持續等待股價觸碰布林下軌(${bb_l:.2f})且低於近期低點(${mode_a_min_low_since_entry:.2f})"
 
-            # 5. 常規新進場觸發檢測
+            # 6. 常規新進場觸發檢測
             elif not in_position and not cd_buy_active:
                 # 試驗模式 A
                 if mode_a_buy_signal:
@@ -766,8 +837,12 @@ class TechnicalAnalysisEngine:
                         entry_mode = "C"
 
             elif in_position:
-                act = f"✊ 模式{entry_mode}續抱中"
-                rsn = f"當前持倉{int(position_ratio*100)}%，未觸發清倉或減倉條件，行情運作正常"
+                if entry_mode == "C2":
+                    act = f"✊ 模式C2保護續抱中"
+                    rsn = f"當前持倉{int(position_ratio*100)}%(C2防守狀態)，原減清倉機制暫停中(收盤價跌破${entry_price*0.97:.2f}將觸發3%硬停損)，等待MACD>2重回正常C模式"
+                else:
+                    act = f"✊ 模式{entry_mode}續抱中"
+                    rsn = f"當前持倉{int(position_ratio*100)}%，未觸發清倉或減倉條件，行情運作正常"
 
             action_list.append(act)
             reason_list.append(rsn)
@@ -1067,7 +1142,7 @@ with tab1:
                         
                         if "100%清倉" in act_text or "離場" in act_text or "停損" in act_text or "過熱清倉" in act_text or "清倉" in act_text or "強弩之末" in act_text:
                             st.error(f"**【操作建議】{act_text}** — {rsn_text}")
-                        elif "被禁用" in act_text or "否決" in act_text or "減倉" in act_text or "取消" in act_text or "等待觸軌" in act_text:
+                        elif "被禁用" in act_text or "否決" in act_text or "減倉" in act_text or "取消" in act_text or "等待" in act_text:
                             st.warning(f"**【操作建議】{act_text}** — {rsn_text}")
                         elif "模式" in act_text or "建倉" in act_text or "補滿倉" in act_text or "續抱" in act_text:
                             st.success(f"**【操作建議】{act_text}** — {rsn_text}")
