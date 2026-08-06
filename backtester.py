@@ -384,7 +384,7 @@ class TechnicalAnalysisEngine:
         df['Reason_20D'] = trend_reason_20d
 
         # ----------------------------------------------------
-        # 核心策略回測邏輯 (含模式 B 新增強弩之末清倉條件)
+        # 核心策略回測邏輯 (含更新之標準趨勢轉空清倉條件)
         # ----------------------------------------------------
         action_list = []
         reason_list = []
@@ -501,8 +501,10 @@ class TechnicalAnalysisEngine:
             # ----------------------------------------------------
             # 出場與清倉機制條件
             # ----------------------------------------------------
+            # 清倉 1 (更新): MACD死叉 + 跌破MA20 + 前4天MACD平均 > 5
             macd_dc = (dif < dea) and (prev_dif >= prev_dea)
-            macd_dc_and_below_ma20 = macd_dc and (close_p < m20)
+            prev_4d_macd_avg = df['MACD_Hist'].iloc[max(0, i-4):i].mean() if i >= 4 else 0.0
+            macd_dc_and_below_ma20 = macd_dc and (close_p < m20) and (prev_4d_macd_avg > 5.0)
 
             days_since_entry = i - entry_index
 
@@ -539,7 +541,7 @@ class TechnicalAnalysisEngine:
             is_near_20d_high = close_p >= (close_20d_max * 0.98)
             mode_b_exit_near_high = (entry_mode == "B") and is_near_20d_high and (prev_temp_val > 80.0) and macd_dc_and_below_ma20
 
-            # 新增清倉 3.5: 模式 B 強弩之末清倉 (陽線最高點創新高，但溫度不是4日內新高)
+            # 清倉 3.5: 模式 B 強弩之末清倉 (陽線最高點創新高，但溫度不是4日內新高)
             is_bull_k = close_p > open_p
             high_15d_max = df['High'].iloc[max(0, i-14):i].max() if i >= 15 else df['High'].iloc[:i].max()
             is_high_new_high = high_p >= high_15d_max
@@ -591,8 +593,8 @@ class TechnicalAnalysisEngine:
 
             # 1. 各項清倉機制優先檢測
             if macd_dc_and_below_ma20 and in_position:
-                act = "🛑 100%清倉(MACD死叉+跌破MA20)"
-                rsn = f"MACD出現死叉且收盤價(${close_p:.2f})跌破MA20(${m20:.2f})，趨勢轉空，無條件全數清倉"
+                act = "🛑 100%清倉(MACD死叉+跌破MA20+前4日MACD均值>5)"
+                rsn = f"MACD出現死叉、收盤價(${close_p:.2f})跌破MA20(${m20:.2f})且前4天MACD柱狀平均({prev_4d_macd_avg:.2f}>5)，趨勢轉空，無條件全數清倉"
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
@@ -829,6 +831,8 @@ class TechnicalAnalysisEngine:
         macd_gc = (dif > dea) and (prev_1['DIF'] <= prev_1['DEA'])
         macd_dc = (dif < dea) and (prev_1['DIF'] >= prev_1['DEA'])
         
+        prev_4d_macd_avg = df['MACD_Hist'].iloc[-5:-1].mean() if len(df) >= 5 else 0.0
+
         if (close_p > m20) and (m20 > m60) and (45.0 <= rsi <= 62.0) and (dif > dea) and not is_high_temp:
             setup_status = "🟢 極佳 (順勢發動)"
         elif is_rsi_oversold and (hist > prev_hist):
@@ -849,8 +853,8 @@ class TechnicalAnalysisEngine:
         elif macd_gc:
             alerts.append("🟢 MACD零軸上金叉(多頭訊號)")
         
-        if macd_dc and (close_p < m20):
-            alerts.append("🛑 MACD死叉+跌破20日線(觸發100%清倉)")
+        if macd_dc and (close_p < m20) and (prev_4d_macd_avg > 5.0):
+            alerts.append("🛑 MACD死叉+跌破20日線+前4日MACD均值>5(觸發100%清倉)")
             
         if (high_p >= bb_u) and (close_p < latest['Open']):
             alerts.append("⚡ 衝高受阻(帶上影線)")
@@ -868,8 +872,8 @@ class TechnicalAnalysisEngine:
 
         if "極致過熱警報" in primary_alert:
             diag_detail = f"市場溫度達{temp:.1f}°C (>88.0)，且最高價超越布林上軌5%，觸發模式C極致過熱清倉條款。"
-        elif "MACD死叉+跌破20日線" in primary_alert:
-            diag_detail = f"今日MACD轉死叉且跌破月線(${m20:.2f})，觸發策略100%清倉防禦條件。"
+        elif "跌破20日線" in primary_alert:
+            diag_detail = f"今日MACD轉死叉、跌破月線(${m20:.2f})且前4日MACD均值({prev_4d_macd_avg:.2f}>5)，觸發策略100%清倉防禦條件。"
         elif "高檔背離" in primary_alert or "從高檔彎頭" in primary_alert:
             diag_detail = f"市場溫度高達{temp:.1f}°C，股價遠離季線，慎防高檔背離拉回。"
         elif "順勢發動" in setup_status:
