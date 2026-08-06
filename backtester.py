@@ -384,7 +384,7 @@ class TechnicalAnalysisEngine:
         df['Reason_20D'] = trend_reason_20d
 
         # ----------------------------------------------------
-        # 核心策略回測邏輯 (修正模式 A 清倉：靠近MA20陽線無法突破且回踩5日線)
+        # 核心策略回測邏輯
         # ----------------------------------------------------
         action_list = []
         reason_list = []
@@ -581,7 +581,7 @@ class TechnicalAnalysisEngine:
             )
 
             # ----------------------------------------------------
-            # 邏輯判定順序 (清倉 > 減倉 > 加倉 > 模式A觸軌重建 > 新訊號觸發)
+            # 邏輯判定順序
             # ----------------------------------------------------
             act = "觀望待變"
             rsn = "指標未符合任何建倉或調整條件"
@@ -719,7 +719,7 @@ class TechnicalAnalysisEngine:
                     mode_a_reentry_pending = False
                     mode_a_min_low_since_entry = low_p
 
-                # 試驗模式 B (即時建倉)
+                # 試驗模式 B
                 elif mode_b_buy_signal:
                     if cond_bear_or_underwater:
                         act = "🚫 模式B被禁用(熊市/MACD水下)"
@@ -1197,7 +1197,18 @@ with tab1:
                         }
                         
                         display_df = show_df[show_cols].rename(columns=rename_dict).sort_index(ascending=False)
-                        st.dataframe(display_df, use_container_width=True)
+
+                        # 設定不自動換行，並開放寬度讓使用者橫向滾動到底完全顯示
+                        st.dataframe(
+                            display_df,
+                            use_container_width=True,
+                            column_config={
+                                "5日格局原因": st.column_config.TextColumn("5日格局原因", width="large"),
+                                "20日格局原因": st.column_config.TextColumn("20日格局原因", width="large"),
+                                "操作建議": st.column_config.TextColumn("操作建議", width="large"),
+                                "策略分析原因": st.column_config.TextColumn("策略分析原因", width="large"),
+                            }
+                        )
 
             except Exception as ex:
                 st.error(f"載入數據失敗: {ex}")
