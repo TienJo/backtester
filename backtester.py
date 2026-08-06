@@ -415,10 +415,6 @@ class TechnicalAnalysisEngine:
         # 模式 B 專屬追蹤狀態
         mode_b_stage = 0
         mode_b_high_alert = False
-        mode_b_exit_cooldown_until = -999
-
-        # 新增：入場日防守參考，用於 A/B 模式早期失敗出場
-        entry_low = 0.0
 
         # 模式 C / C2 專屬追蹤狀態
         mode_c2_reentry_pending = False
@@ -521,41 +517,10 @@ class TechnicalAnalysisEngine:
             gen_trend_reverse_exit = macd_dc and (close_p < m20) and (not is_macd_flat)
 
             # ----------------------------------------------------
-            # 模式 A 邏輯：超賣反彈，但必須確認「跌勢衰竭」而不是剛開始下跌
+            # 模式 A 邏輯
             # ----------------------------------------------------
             rsi_recent_oversold = (df['RSI14'].iloc[max(0, i-4):i+1] < 30.0).any()
-
-            candle_range = max(high_p - low_p, 1e-9)
-            close_recovery_ratio = (close_p - low_p) / candle_range
-            upper_shadow_ratio = (high_p - close_p) / candle_range
-            lower_shadow_ratio = (min(open_p, close_p) - low_p) / candle_range
-
-            prev_close = df['Close'].iloc[i-1]
-            prev2_close = df['Close'].iloc[i-2] if i >= 2 else prev_close
-            prev_m20 = df['MA20'].iloc[i-1]
-            prev2_m20 = df['MA20'].iloc[i-2] if i >= 2 else prev_m20
-            recent_close_5 = df['Close'].iloc[max(0, i-4):i+1]
-            down_days_5 = int((recent_close_5.diff() < 0).sum())
-            ret_5d = (close_p / df['Close'].iloc[i-5] - 1.0) if i >= 5 and df['Close'].iloc[i-5] > 0 else 0.0
-
-            fresh_ma20_breakdown = (close_p < m20) and ((prev_close >= prev_m20) or (prev2_close >= prev2_m20))
-            ma_short_bear_align = (m5 < m10) and (m10 < m20) and (m20_diff < 0)
-            a_touch_lower_band = low_p <= bb_l * 1.01
-            a_reversal_candle = (close_p > open_p) or (close_recovery_ratio >= 0.58) or (lower_shadow_ratio >= 0.35)
-            a_momentum_turn = (rsi_diff_1 >= 8.0) and (hist >= prev_hist) and (rsi >= prev_rsi)
-            a_decline_mature = (down_days_5 >= 3) or (ret_5d <= -0.06) or a_touch_lower_band
-            a_not_fresh_falling_knife = (not fresh_ma20_breakdown) or (a_touch_lower_band and a_reversal_candle and a_momentum_turn)
-            a_not_weak_trend = (not ma_short_bear_align) or (a_touch_lower_band and close_recovery_ratio >= 0.65 and hist >= prev_hist)
-
-            mode_a_buy_signal = (
-                rsi_recent_oversold
-                and a_momentum_turn
-                and a_decline_mature
-                and a_touch_lower_band
-                and a_reversal_candle
-                and a_not_fresh_falling_knife
-                and a_not_weak_trend
-            )
+            mode_a_buy_signal = rsi_recent_oversold and (rsi_diff_1 >= 8.0)
 
             if in_position and entry_mode == "A":
                 mode_a_min_low_since_entry = min(mode_a_min_low_since_entry, low_p)
@@ -576,43 +541,15 @@ class TechnicalAnalysisEngine:
                 if (temp_4d_max <= entry_temp) and (temp_val < entry_temp) and (rsi < entry_rsi):
                     mode_a_weak_death_exit = True
 
-            # 新增：A 模式硬停損與時間停損，避免剛下跌趨勢裡越套越深
-            mode_a_hard_stop_exit = in_position and (entry_mode == "A") and (
-                (close_p < entry_price * 0.97) or
-                ((entry_low > 0) and (close_p < entry_low * 0.995)) or
-                ((days_since_entry <= 3) and (close_p < bb_l) and (hist < prev_hist))
-            )
-            mode_a_time_stop_exit = in_position and (entry_mode == "A") and (days_since_entry >= 2) and (days_since_entry <= 5) and (
-                (close_p < m5 and rsi < entry_rsi) or
-                (hist < prev_hist and close_p < entry_price)
-            )
-
             # ----------------------------------------------------
-            # 模式 B 邏輯：強勢回檔只買「多頭回踩後重新站回」，不買弱反彈
+            # 模式 B 邏輯
             # ----------------------------------------------------
-            cond_b_env = (m20 > m60) and (m20_diff > 0) and (close_p > m60) and (dif > 0)
-            cond_b_rsi = (40.0 <= prev_rsi <= 55.0) and (rsi_diff_1 > 0) and (rsi >= 45.0)
+            cond_b_env = ((m20 > m60) or (dif > 0)) and (close_p > m60)
+            cond_b_rsi = (40.0 <= prev_rsi <= 50.0) and (rsi_diff_1 > 0)
             touched_ma20_recent = (df['Low'].iloc[max(0, i-1):i+1] <= df['MA20'].iloc[max(0, i-1):i+1] * 1.015).any()
             
-            b_ma_structure_ok = (m5 >= m20 * 0.995) and (m10 > m20) and (m20 > m60)
-            b_reclaim_ok = (close_p >= m20 * 1.003) and (close_p > m5) and (close_p > open_p)
-            b_candle_quality_ok = (close_recovery_ratio >= 0.55) and (upper_shadow_ratio <= 0.45)
-            b_momentum_ok = (hist >= prev_hist) and (not macd_dc) and (temp_val >= 50.0) and (temp_val >= prev_temp_val * 0.92)
-            b_not_overheated_cooldown = not ((prev_temp_val > 80.0) and (temp_val < prev_temp_val) and (close_p < m5))
-            b_exit_cooldown_ok = i >= mode_b_exit_cooldown_until
-
-            mode_b_buy_stage1 = (
-                cond_b_env
-                and cond_b_rsi
-                and touched_ma20_recent
-                and b_ma_structure_ok
-                and b_reclaim_ok
-                and b_candle_quality_ok
-                and b_momentum_ok
-                and b_not_overheated_cooldown
-                and b_exit_cooldown_ok
-            )
-            mode_b_buy_stage2 = in_position and (entry_mode == "B") and (mode_b_stage == 1) and (close_p > open_p) and (close_p > m5) and (m20_diff > 0) and (close_p >= m20 * 1.01) and (hist >= prev_hist) and (rsi >= 50.0)
+            mode_b_buy_stage1 = cond_b_env and cond_b_rsi and touched_ma20_recent
+            mode_b_buy_stage2 = in_position and (entry_mode == "B") and (mode_b_stage == 1) and (close_p > open_p) and (close_p > m5) and (m20_diff > 0) and (close_p >= m20 * 1.01)
 
             temp_20d_std = df['Temperature'].iloc[max(0, i-19):i+1].std() if i >= 19 else 10.0
             is_15d_high = high_p >= df['High'].iloc[max(0, i-14):i+1].max() if i >= 14 else False
@@ -623,17 +560,6 @@ class TechnicalAnalysisEngine:
             close_20d_max = df['Close'].iloc[max(0, i-19):i+1].max() if i >= 19 else close_p
             if in_position and (entry_mode == "B") and (close_p >= close_20d_max * 0.98) and (prev_temp_val > 80.0):
                 mode_b_high_alert = True
-
-            # 新增：B 模式早期失敗與逾時出場，避免「弱反彈建倉後一直續抱」
-            mode_b_early_fail_exit = in_position and (entry_mode == "B") and (days_since_entry <= 4) and (
-                (close_p < entry_price * 0.98) or
-                (close_p < m20) or
-                ((close_p < m5) and (hist < prev_hist)) or
-                ((entry_low > 0) and (close_p < entry_low * 0.995))
-            )
-            mode_b_stage1_timeout_exit = in_position and (entry_mode == "B") and (mode_b_stage == 1) and (days_since_entry >= 3) and (
-                (close_p < m5) or (hist < prev_hist) or (rsi < entry_rsi)
-            )
 
             # ----------------------------------------------------
             # 模式 C 邏輯
@@ -713,24 +639,6 @@ class TechnicalAnalysisEngine:
                 position_ratio = 0.0
                 entry_mode = ""
 
-            elif mode_a_hard_stop_exit and in_position:
-                act = "🛑 模式A硬停損清倉"
-                rsn = f"A模式屬逆勢反彈，收盤跌破建倉價3%或跌破入場日低點，避免剛下跌趨勢中擴大虧損"
-                in_position = False
-                position_ratio = 0.0
-                entry_mode = ""
-                mode_a_failed_breakout_ma20 = False
-                mode_a_reentry_pending = True
-
-            elif mode_a_time_stop_exit and in_position:
-                act = "🛑 模式A時間停損清倉"
-                rsn = f"建倉後2至5日未站回MA5，且RSI/MACD動能未延續，判定反彈失敗先離場"
-                in_position = False
-                position_ratio = 0.0
-                entry_mode = ""
-                mode_a_failed_breakout_ma20 = False
-                mode_a_reentry_pending = True
-
             elif mode_a_breakout_fail_exit and in_position:
                 act = "🛑 模式A突破失敗清倉"
                 rsn = f"建倉一周內無法突破MA20並跌破MA5，判定反彈無力清倉，等待觸碰下軌重進"
@@ -756,26 +664,6 @@ class TechnicalAnalysisEngine:
                 entry_mode = ""
                 mode_a_failed_breakout_ma20 = False
 
-            elif mode_b_early_fail_exit and in_position:
-                act = "🛑 模式B早期失敗清倉"
-                rsn = "B模式建倉後4日內跌破入場價/MA20/入場日低點，代表回踩沒有重新轉強，先全數退出"
-                in_position = False
-                position_ratio = 0.0
-                entry_mode = ""
-                mode_b_high_alert = False
-                mode_b_stage = 0
-                mode_b_exit_cooldown_until = i + 5
-
-            elif mode_b_stage1_timeout_exit and in_position:
-                act = "🛑 模式B底倉逾時清倉"
-                rsn = "B模式底倉3日內未能加碼確認，且收盤跌破MA5或動能轉弱，取消底倉等待下一次回踩確認"
-                in_position = False
-                position_ratio = 0.0
-                entry_mode = ""
-                mode_b_high_alert = False
-                mode_b_stage = 0
-                mode_b_exit_cooldown_until = i + 5
-
             elif in_position and entry_mode == "B" and mode_b_high_alert:
                 if macd_dc and position_ratio > 0.5:
                     act = "⚠️ 模式B高檔鈍化(MACD死叉減半)"
@@ -783,13 +671,11 @@ class TechnicalAnalysisEngine:
                     position_ratio -= 0.5
                 elif close_p < m20:
                     act = "🛑 模式B高檔鈍化(跌破MA20清倉)"
-                    rsn = "位於高檔區且跌破20日線，將剩餘倉位全數清空，並啟動5日冷卻避免馬上反手再買"
+                    rsn = "位於高檔區且跌破20日線，將剩餘倉位全數清空"
                     in_position = False
                     position_ratio = 0.0
                     entry_mode = ""
                     mode_b_high_alert = False
-                    mode_b_stage = 0
-                    mode_b_exit_cooldown_until = i + 5
 
             # 第二優先：減倉機制
             elif gen_new_high_drop and in_position:
@@ -831,7 +717,6 @@ class TechnicalAnalysisEngine:
                     last_buy_index = i
                     entry_index = i
                     entry_price = close_p
-                    entry_low = low_p
                     entry_temp = temp_val
                     entry_rsi = rsi
                     in_position = True
@@ -844,16 +729,15 @@ class TechnicalAnalysisEngine:
 
             elif not in_position and mode_a_reentry_pending:
                 if (low_p <= bb_l) and (low_p < mode_a_min_low_since_entry):
-                    act = "🟢 模式A:觸底重建(30%防守底倉)"
-                    rsn = f"觸及布林下軌且跌破前次新低，先重新建立30%防守底倉"
+                    act = "🟢 模式A:觸底重建(半倉)"
+                    rsn = f"觸及布林下軌且跌破前次新低，重新建立50%半倉"
                     last_buy_index = i
                     entry_index = i
                     entry_price = close_p
-                    entry_low = low_p
                     entry_temp = temp_val
                     entry_rsi = rsi
                     in_position = True
-                    position_ratio = 0.3
+                    position_ratio = 0.5
                     entry_mode = "A"
                     mode_a_failed_breakout_ma20 = False
                     mode_a_reentry_pending = False
@@ -865,16 +749,15 @@ class TechnicalAnalysisEngine:
             # 第四優先：常規建倉
             elif not in_position and not cd_buy_active:
                 if mode_a_buy_signal:
-                    act = "🟢 模式A:超賣強彈(30%防守底倉)"
-                    rsn = f"RSI曾破30並確認觸及布林下軌、收盤回收與MACD不再惡化，先建立30%防守底倉"
+                    act = "🟢 模式A:超賣強彈(半倉)"
+                    rsn = f"RSI曾破30超賣區且當日回升大於8點，建立50%半倉"
                     last_buy_index = i
                     entry_index = i
                     entry_price = close_p
-                    entry_low = low_p
                     entry_temp = temp_val
                     entry_rsi = rsi
                     in_position = True
-                    position_ratio = 0.3
+                    position_ratio = 0.5
                     entry_mode = "A"
                     mode_a_failed_breakout_ma20 = False
                     mode_a_reentry_pending = False
@@ -892,11 +775,10 @@ class TechnicalAnalysisEngine:
                         rsn = "溫度10日線下滑且低於50度，否決建倉"
                     else:
                         act = "🟢 模式B:強勢回檔(觀察底倉30%)"
-                        rsn = f"符合B模式回踩MA20後重新站回條件，投入30%作為觀察底倉"
+                        rsn = f"符合B模式回檔條件，投入30%作為觀察底倉"
                         last_buy_index = i
                         entry_index = i
                         entry_price = close_p
-                        entry_low = low_p
                         entry_temp = temp_val
                         entry_rsi = rsi
                         in_position = True
@@ -917,7 +799,6 @@ class TechnicalAnalysisEngine:
                         last_buy_index = i
                         entry_index = i
                         entry_price = close_p
-                        entry_low = low_p
                         entry_temp = temp_val
                         entry_rsi = rsi
                         in_position = True
