@@ -384,7 +384,7 @@ class TechnicalAnalysisEngine:
         df['Reason_20D'] = trend_reason_20d
 
         # ----------------------------------------------------
-        # 核心策略回測邏輯
+        # 核心策略回測邏輯 (含模式 A 遇 MA20 受阻回踩與觸軌新低重建倉、模式 C 溫度條件)
         # ----------------------------------------------------
         action_list = []
         reason_list = []
@@ -399,28 +399,14 @@ class TechnicalAnalysisEngine:
         entry_low = 0.0
         entry_index = -999
         entry_temp = 0.0
+        entry_rsi = 0.0
+        
+        mode_a_touched_ma20 = False
+        
+        mode_b_pending = False
+        mode_b_pending_low = 0.0
         
         mode_c_reduce_cooldown_until = -999
-        mode_b_cooldown_until = -999
-
-        # 通用新高追蹤與 3 日低點狀態
-        highest_close_since_entry = 0.0
-        new_high_index = -999
-        box_3d_low = 0.0
-
-        # 模式 A 專屬追蹤狀態
-        mode_a_failed_breakout_ma20 = False
-        mode_a_reentry_pending = False
-        mode_a_min_low_since_entry = 999999.0
-
-        # 模式 B 專屬追蹤狀態
-        mode_b_stage = 0
-        mode_b_high_alert = False
-
-        # 模式 C / C2 專屬追蹤狀態
-        mode_c2_reentry_pending = False
-        mode_c2_min_macd = 999999.0
-        mode_c2_min_rsi = 999999.0
 
         for i in range(len(df)):
             current_date = df.index[i]
@@ -442,11 +428,6 @@ class TechnicalAnalysisEngine:
             open_p = df['Open'].iloc[i]
             high_p = df['High'].iloc[i]
             low_p = df['Low'].iloc[i]
-            
-            amplitude = high_p - low_p
-            close_pos = (close_p - low_p) / amplitude if amplitude > 0 else 0.5
-            upper_shadow = (high_p - max(open_p, close_p)) / amplitude if amplitude > 0 else 0
-            lower_shadow = (min(open_p, close_p) - low_p) / amplitude if amplitude > 0 else 0
 
             m5 = df['MA5'].iloc[i]
             m10 = df['MA10'].iloc[i]
@@ -473,23 +454,9 @@ class TechnicalAnalysisEngine:
             prev_temp_val = df['Temperature'].iloc[i-1]
             temp_ma10 = df['Temperature_MA10'].iloc[i]
 
-            days_since_entry = i - entry_index if in_position else 0
-
             # ----------------------------------------------------
-            # 通用防禦與狀態更新
+            # 濾網條件計算
             # ----------------------------------------------------
-            if in_position:
-                if close_p > highest_close_since_entry:
-                    highest_close_since_entry = close_p
-                    new_high_index = i
-                    box_3d_low = df['Low'].iloc[max(0, i-2):i+1].min()
-            else:
-                highest_close_since_entry = 0.0
-                new_high_index = -999
-                box_3d_low = 0.0
-                mode_b_stage = 0
-                mode_b_high_alert = False
-
             is_ma60_down = m60 < df['MA60'].iloc[i-1]
             is_bear_market = is_ma60_down and (close_p < m60)
             is_macd_underwater = (dif < 0) and (dea < 0)
@@ -504,337 +471,294 @@ class TechnicalAnalysisEngine:
             cd_buy_active = (i - last_buy_index) < 5
 
             # ----------------------------------------------------
-            # 通用出場條件
+            # 進場訊號觸發條件
             # ----------------------------------------------------
-            gen_new_high_drop = False
-            if in_position and position_ratio > 0.5 and (i <= new_high_index + 3) and (close_p < box_3d_low) and (i > new_high_index):
-                gen_new_high_drop = True
-
-            macd_dc = (dif < dea) and (prev_dif >= prev_dea)
-            macd_hist_4d_std = df['MACD_Hist'].iloc[max(0, i-4):i].std() if i >= 4 else 0.0
-            is_macd_flat = macd_hist_4d_std < 0.5
-            gen_trend_reverse_exit = macd_dc and (close_p < m20) and (not is_macd_flat)
-
-            # ----------------------------------------------------
-            # 模式 B 邏輯 (多頭回踩與實體回收確認)
-            # ----------------------------------------------------
-            cond_b_trend = (m20 > m60) and (m20_diff > 0) and (dif > 0)
-            touched_ma20_recent = (df['Low'].iloc[max(0, i-2):i+1] <= df['MA20'].iloc[max(0, i-2):i+1] * 1.015).any()
-            cond_b_price = (close_p >= m20 * 1.003) and (close_p > m5) and (close_p > open_p)
-            cond_b_k_quality = (close_pos > 0.5) and (upper_shadow < 0.3)
-            cond_b_momentum = (hist >= prev_hist) and (temp_val >= prev_temp_val - 3.0)
-            
-            mode_b_buy_stage1 = cond_b_trend and touched_ma20_recent and cond_b_price and cond_b_k_quality and cond_b_momentum and (i >= mode_b_cooldown_until)
-            mode_b_buy_stage2 = in_position and (entry_mode == "B") and (mode_b_stage == 1) and cond_b_price
-
-            temp_20d_std = df['Temperature'].iloc[max(0, i-19):i+1].std() if i >= 19 else 10.0
-            is_15d_high = high_p >= df['High'].iloc[max(0, i-14):i+1].max() if i >= 14 else False
-            temp_4d_max = df['Temperature'].iloc[max(0, i-3):i+1].max() if i >= 3 else temp_val
-            mode_b_div_reduce = in_position and (entry_mode == "B") and is_15d_high and (temp_val < temp_4d_max) and (temp_val < (1.5 * temp_20d_std))
-
-            close_20d_max = df['Close'].iloc[max(0, i-19):i+1].max() if i >= 19 else close_p
-            if in_position and (entry_mode == "B") and (close_p >= close_20d_max * 0.98) and (prev_temp_val > 80.0):
-                mode_b_high_alert = True
-
-            mode_b_4d_stop = in_position and (entry_mode == "B") and (days_since_entry <= 4) and (
-                (close_p < entry_price * 0.98) or (close_p < m20) or (close_p < entry_low) or ((close_p < m5) and (hist < prev_hist))
-            )
-            mode_b_3d_cancel = in_position and (entry_mode == "B") and (position_ratio == 0.3) and (days_since_entry >= 3) and (hist < prev_hist)
-
-            # ----------------------------------------------------
-            # 模式 A 邏輯 (極端超賣與底部回收確認)
-            # ----------------------------------------------------
+            # 模式 A: 超賣強彈/抄底
             rsi_recent_oversold = (df['RSI14'].iloc[max(0, i-4):i+1] < 30.0).any()
-            touch_bb_lower = low_p <= bb_l * 1.01
-            reversal_k = (close_p > open_p) or (close_pos >= 0.6) or (lower_shadow >= 0.5)
-            momentum_ok = (rsi_diff_1 > 0) and (hist >= prev_hist)
-            
-            is_fresh_drop_ma20 = (close_p < m20) and (df['Close'].iloc[i-1] >= df['MA20'].iloc[i-1])
-            block_early_drop = is_fresh_drop_ma20 and not (touch_bb_lower and close_pos > 0.8)
-            
-            short_bear_ma = (m5 < m10) and (m10 < m20)
-            allow_bear_ma = touch_bb_lower and reversal_k and (rsi < 35)
-            block_bear_ma = short_bear_ma and not allow_bear_ma
+            mode_a_buy_signal = rsi_recent_oversold and (rsi_diff_1 >= 8.0)
 
-            mode_a_buy_signal = rsi_recent_oversold and touch_bb_lower and reversal_k and momentum_ok and not block_early_drop and not block_bear_ma
+            # 新增: 模式 A 觸碰布林下軌且破近15日新低重建倉條件
+            low_15d_min = df['Low'].iloc[max(0, i-14):i].min() if i >= 15 else df['Low'].iloc[:i].min()
+            mode_a_bbl_rebuy_signal = (low_p <= bb_l) and (low_p < low_15d_min)
 
-            if in_position and entry_mode == "A":
-                mode_a_min_low_since_entry = min(mode_a_min_low_since_entry, low_p)
-
-            mode_a_hard_stop = in_position and (entry_mode == "A") and (
-                (close_p < entry_price * 0.97) or (close_p < entry_low) or ((low_p < bb_l) and (hist < prev_hist) and days_since_entry <= 3)
+            # 模式 B: 強勢回檔再發動
+            cond_b_env = ((m20 > m60) or (dif > 0)) and (close_p > m60) and (dif > 0)
+            cond_b_rsi = (40.0 <= prev_rsi <= 50.0) and (rsi_diff_1 > 0)
+            touched_ma20_recent = (df['Low'].iloc[max(0, i-1):i+1] <= df['MA20'].iloc[max(0, i-1):i+1] * 1.015).any()
+            cond_b_price = (
+                touched_ma20_recent and (close_p > open_p) and (close_p > m5) and 
+                (m20_diff > 0) and (close_p >= m20 * 1.01) and (low_p > df['Close'].iloc[i-1])
             )
-            mode_a_time_stop = in_position and (entry_mode == "A") and (2 <= days_since_entry <= 5) and (close_p < m5) and (rsi_diff_1 <= 0) and (hist < prev_hist)
-            mode_a_fake_high_exit = (entry_mode == "A") and (temp_val > 80.0) and (close_p < entry_price * 1.03)
+            mode_b_buy_signal = cond_b_env and cond_b_rsi and cond_b_price
 
-            # ----------------------------------------------------
-            # 模式 C 邏輯 (平台突破)
-            # ----------------------------------------------------
-            close_15d_max = df['Close'].iloc[max(0, i-14):i].max() if i >= 15 else close_p
-            high_15d_max = df['High'].iloc[max(0, i-14):i].max() if i >= 15 else high_p
-            
+            # 模式 C: 平台突破 (建倉條件: 溫度須小於 85)
+            close_15d_max = df['Close'].iloc[max(0, i-14):i].max() if i >= 15 else df['Close'].iloc[:i].max()
             cond_c_ma_align = (close_p > m20) and (m20 > m60)
             cond_c_new_high = close_p > close_15d_max
             cond_c_long_red = (close_p > open_p) and (close_p >= bb_u * 0.995)
             cond_c_temp_limit = temp_val < 85.0
             mode_c_buy_signal = cond_c_ma_align and cond_c_new_high and cond_c_long_red and cond_c_temp_limit
 
-            mode_c_spike_drop_exit = in_position and (entry_mode == "C") and (high_p >= high_15d_max) and ((prev_hist - hist) > 6.0) and (hist < 2.0)
-            mode_c_macd_exhaust = in_position and (entry_mode == "C") and (hist < 2.0) and ((prev_hist - hist) >= 10.0)
-            mode_c_overheat_exit = (entry_mode == "C") and (temp_val > 88.0) and (close_p >= close_15d_max) and (close_p > open_p) and (high_p > bb_u * 1.05)
+            # ----------------------------------------------------
+            # 出場與清倉機制條件
+            # ----------------------------------------------------
+            days_since_entry = i - entry_index
+
+            macd_dc = (dif < dea) and (prev_dif >= prev_dea)
+            macd_dc_and_below_ma20 = macd_dc and (close_p < m20)
+
+            # 新增: 模式 A 漲至 MA20 附近無法突破，回踩 10 日線清倉
+            if in_position and (entry_mode == "A"):
+                if high_p >= m20 * 0.985 and close_p < m20:
+                    mode_a_touched_ma20 = True
+                
+                if mode_a_touched_ma20 and (low_p <= m10) and (close_p < m20):
+                    mode_a_ma20_reject_exit = True
+                else:
+                    mode_a_ma20_reject_exit = False
+            else:
+                mode_a_touched_ma20 = False
+                mode_a_ma20_reject_exit = False
+
+            # 清倉 2: 模式 A 虛高放棄建倉
+            mode_a_fake_high_exit = (entry_mode == "A") and (temp_val > 80.0) and (close_p < entry_price * 1.03)
+
+            # 清倉 2.5: 模式 A 弱死亡放棄建倉
+            is_mode_a_day4 = in_position and (entry_mode == "A") and (days_since_entry == 4)
+            if is_mode_a_day4:
+                temp_4d_max = df['Temperature'].iloc[entry_index:i+1].max()
+                temp_no_new_high = temp_4d_max <= entry_temp
+                temp_and_rsi_declining = (temp_val < entry_temp) and (rsi < entry_rsi)
+                mode_a_weak_death_exit = temp_no_new_high and temp_and_rsi_declining
+            else:
+                mode_a_weak_death_exit = False
+
+            # 清倉 3: 模式 B 高位獲利清倉
+            close_20d_max = df['Close'].iloc[max(0, i-19):i+1].max()
+            is_near_20d_high = close_p >= (close_20d_max * 0.98)
+            mode_b_exit_near_high = (entry_mode == "B") and is_near_20d_high and (prev_temp_val > 80.0) and macd_dc_and_below_ma20
+
+            # 清倉 4: 模式 C 動能衰竭清倉
+            mode_c_macd_exhaust_exit = (entry_mode == "C") and (dif > 0) and (hist < 10.0) and ((prev_hist - hist) >= 10.0)
+
+            # 清倉 4.5: 模式 C 極致過熱清倉 (溫度 > 88、創新高、且陽線最高價超過布林上軌 5%)
+            is_bull_k = close_p > open_p
+            mode_c_overheat_exit = (
+                (entry_mode == "C") and 
+                (temp_val > 88.0) and 
+                (close_p >= close_15d_max) and 
+                is_bull_k and 
+                (high_p > bb_u * 1.05)
+            )
+
+            # 清倉 5: 模式 B/C 三日認錯停損
+            mode_bc_3d_failed = in_position and (entry_mode in ["B", "C"]) and (1 <= days_since_entry <= 3) and (close_p < entry_low)
+
+            # ----------------------------------------------------
+            # 減倉機制條件 (模式 C 專屬)
+            # ----------------------------------------------------
+            temp_drop_3d = (df['Temperature'].iloc[max(0, i-2)] - temp_val) if i >= 2 else 0.0
+            mode_c_reduce_trigger = (entry_mode == "C") and (position_ratio > 0.2) and (temp_drop_3d > 20.0)
 
             gain_since_entry = ((close_p - entry_price) / entry_price) if (in_position and entry_price > 0) else 0.0
-            mode_c_gain_reduce = (entry_mode == "C") and (1 <= days_since_entry <= 2) and (gain_since_entry > 0.10) and (position_ratio > 0.2)
-
-            mode_c_add_signal = (entry_mode == "C") and (position_ratio in [0.2, 0.5]) and (close_p > m20) and (bb_u_diff5 > 0) and (i >= mode_c_reduce_cooldown_until)
-
-            # ----------------------------------------------------
-            # C2 模式邏輯
-            # ----------------------------------------------------
-            if not in_position and mode_c2_reentry_pending:
-                mode_c2_min_macd = min(mode_c2_min_macd, hist)
-                mode_c2_min_rsi = min(mode_c2_min_rsi, rsi)
-
-            mode_c2_loss_exit = in_position and (entry_mode == "C2") and (close_p < entry_price * 0.97)
-
-            if in_position and (entry_mode == "C2") and (hist > 2.0):
-                entry_mode = "C"
+            mode_c_gain_reduce_trigger = (
+                (entry_mode == "C") and 
+                (1 <= days_since_entry <= 2) and 
+                (gain_since_entry > 0.10) and 
+                (position_ratio > 0.2)
+            )
 
             # ----------------------------------------------------
-            # 決策執行順序
+            # 邏輯判定順序 (清倉 > 減倉 > T+1建倉 > 新訊號觸發)
             # ----------------------------------------------------
             act = "觀望待變"
             rsn = "指標未符合任何建倉或調整條件"
 
-            # 第一優先：通用與致命清倉
-            if gen_trend_reverse_exit and in_position:
+            # 1. 各項清倉機制優先檢測
+            if macd_dc_and_below_ma20 and in_position:
                 act = "🛑 100%清倉(MACD死叉+跌破MA20)"
-                rsn = f"MACD死叉且收盤價(${close_p:.2f})跌破MA20(${m20:.2f})，趨勢轉空，無條件全數清倉"
+                rsn = f"MACD出現死叉且收盤價(${close_p:.2f})跌破MA20(${m20:.2f})，趨勢轉空，無條件全數清倉"
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
+                mode_b_pending = False
+                mode_a_touched_ma20 = False
 
-            elif mode_c2_loss_exit and in_position:
-                act = "🛑 模式C2停損清倉"
-                rsn = f"收盤價(${close_p:.2f})跌破C2建倉價3%停損線，執行全數退場"
+            elif mode_a_ma20_reject_exit and in_position:
+                act = "🛑 模式A遇MA20受阻回踩清倉"
+                rsn = f"模式A持倉期間上攻靠近MA20(${m20:.2f})無法突破，今日回踩跌破10日線(${m10:.2f})，獲利/防禦性全數清倉"
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
-
-            elif mode_c_spike_drop_exit and in_position:
-                act = "🛑 模式C急跌清倉(轉C2預備)"
-                rsn = f"MACD柱狀單日驟跌超過6且低於2，啟動100%清倉並開啟C2追蹤"
-                in_position = False
-                position_ratio = 0.0
-                entry_mode = ""
-                mode_c2_reentry_pending = True
-                mode_c2_min_macd = hist
-                mode_c2_min_rsi = rsi
+                mode_a_touched_ma20 = False
 
             elif mode_c_overheat_exit and in_position:
                 act = "🛑 模式C極致過熱清倉"
-                rsn = f"溫度({temp_val:.1f}>88)極度過熱且衝破布林上軌5%，鎖定獲利清倉"
+                rsn = f"模式C持倉中市場溫度({temp_val:.1f}>88)極度過熱，股價創新高且陽線最高價(${high_p:.2f})超越布林上軌5%以上，全數清倉鎖定獲利"
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
-
-            elif mode_c_macd_exhaust and in_position:
-                act = "🛑 模式C動能衰竭清倉"
-                rsn = f"MACD柱狀驟減超過10且低於2，動能衰竭清倉"
-                in_position = False
-                position_ratio = 0.0
-                entry_mode = ""
-
-            elif mode_b_4d_stop and in_position:
-                act = "🛑 模式B四日硬停損清倉"
-                rsn = f"建倉4日內跌破防守線(建倉價2%、跌破月線或破底)，無條件清倉並啟動5日冷卻"
-                in_position = False
-                position_ratio = 0.0
-                entry_mode = ""
-                mode_b_cooldown_until = i + 5
-                
-            elif mode_b_3d_cancel and in_position:
-                act = "🛑 模式B三日未加碼取消底倉"
-                rsn = f"底倉建立3日內未能確認加碼且動能轉弱，主動取消建倉並啟動5日冷卻"
-                in_position = False
-                position_ratio = 0.0
-                entry_mode = ""
-                mode_b_cooldown_until = i + 5
-
-            elif mode_a_hard_stop and in_position:
-                act = "🛑 模式A硬停損清倉"
-                rsn = f"跌破建倉價3%或破底，觸發極限防守全數清倉"
-                in_position = False
-                position_ratio = 0.0
-                entry_mode = ""
-                mode_a_reentry_pending = True
-
-            elif mode_a_time_stop and in_position:
-                act = "🛑 模式A時間停損清倉"
-                rsn = f"建倉後2-5日未站回MA5且指標未見延續，反彈無力清倉"
-                in_position = False
-                position_ratio = 0.0
-                entry_mode = ""
-                mode_a_reentry_pending = True
 
             elif mode_a_fake_high_exit and in_position:
                 act = "🛑 模式A虛高清倉"
-                rsn = f"溫度(>80)虛高但收盤價漲幅未達3%，判定虛漲離場"
+                rsn = f"模式A持倉中市場溫度(${temp_val:.1f})>80，但收盤價未達建倉價+3%(${entry_price*1.03:.2f})，判定虛高離場"
+                in_position = False
+                position_ratio = 0.0
+                entry_mode = ""
+                mode_a_touched_ma20 = False
+
+            elif mode_a_weak_death_exit and in_position:
+                act = "🛑 模式A弱死亡清倉"
+                rsn = f"模式A建倉第4天回測，4天內溫度未創新高({entry_temp:.1f})，且溫度({temp_val:.1f})與RSI({rsi:.1f})皆負成長，動能衰竭清倉"
+                in_position = False
+                position_ratio = 0.0
+                entry_mode = ""
+                mode_a_touched_ma20 = False
+
+            elif mode_b_exit_near_high and in_position:
+                act = "🛑 模式B高位獲利清倉"
+                rsn = f"股價位居20日高檔且前日溫度>80，出現MACD死叉並跌破MA20，鎖定獲利100%清倉"
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
 
-            elif in_position and entry_mode == "B" and mode_b_high_alert:
-                if macd_dc and position_ratio > 0.5:
-                    act = "⚠️ 模式B高檔鈍化(MACD死叉減半)"
-                    rsn = "位於高檔區且出現MACD死叉，先出脫50%持倉"
-                    position_ratio -= 0.5
-                elif close_p < m20:
-                    act = "🛑 模式B高檔鈍化(跌破MA20清倉)"
-                    rsn = "位於高檔區且跌破20日線，將剩餘倉位全數清空"
-                    in_position = False
-                    position_ratio = 0.0
-                    entry_mode = ""
-                    mode_b_high_alert = False
+            elif mode_c_macd_exhaust_exit and in_position:
+                act = "🛑 模式C動能衰竭清倉"
+                rsn = f"模式C持倉中MACD水上柱狀體({hist:.2f})<10且較前日驟降({prev_hist - hist:.2f}>=10)，動能失血清倉"
+                in_position = False
+                position_ratio = 0.0
+                entry_mode = ""
 
-            # 第二優先：減倉機制
-            elif gen_new_high_drop and in_position:
-                act = "⚠️ 創高後跌破3日低點(減半倉)"
-                rsn = f"創新高後3日內跌破箱體低點(${box_3d_low:.2f})，減去一半倉位鎖定資金"
-                position_ratio = max(0.2, position_ratio - 0.5)
+            elif mode_bc_3d_failed and in_position:
+                act = f"🛑 模式{entry_mode} 3日認錯停損"
+                rsn = f"模式{entry_mode}入場3日內收盤價跌破建倉日最低點(${entry_low:.2f})，判定假突破，100%停損退場"
+                in_position = False
+                position_ratio = 0.0
+                entry_mode = ""
 
-            elif mode_b_div_reduce and in_position:
-                act = "⚠️ 模式B動能背離(減50%倉位)"
-                rsn = "創15日新高但溫度未創4日新高且偏低，推升力道虛弱，減去一半倉位"
-                position_ratio = max(0.3, position_ratio - 0.5)
-                
-            elif mode_c_gain_reduce and in_position:
-                act = "⚠️ 模式C獲利達標(強制降至2層倉)"
-                rsn = f"建倉2日內總報酬率超過10%，強制獲利了結減至20%，鎖定10日內不可加倉"
+            # 2. 模式 C 專屬減倉機制
+            elif mode_c_gain_reduce_trigger:
+                act = "⚠️ 模式C獲利止盈減倉(減至2層倉)"
+                rsn = f"模式C建倉後2日內總收益率達{gain_since_entry*100:.1f}%(>10%)，強制減倉至2層倉(20%)，並鎖定10日內不可加倉"
                 position_ratio = 0.2
                 mode_c_reduce_cooldown_until = i + 10
 
-            # 第三優先：加碼與重建機制
-            elif mode_b_buy_stage2:
-                act = "🚀 模式B第二階段(加碼至50%)"
-                rsn = "首波建倉後，再次收紅站上MA5且符合價格品質，加碼倉位至50%"
+            elif mode_c_reduce_trigger:
+                act = "⚠️ 模式C減倉50%"
+                rsn = f"模式C持倉3日內市場溫度急速驟降{temp_drop_3d:.1f}度(>20度)，隔日馬上減至半倉，並鎖定3日禁止加倉"
                 position_ratio = 0.5
-                mode_b_stage = 2
+                mode_c_reduce_cooldown_until = i + 3
 
-            elif mode_c_add_signal:
-                act = "🚀 模式C順勢加碼(補滿倉)"
-                rsn = "股價企穩於MA20之上且布林上軌連續擴張，加碼補滿至100%滿倉"
-                position_ratio = 1.0
-
-            elif not in_position and mode_c2_reentry_pending:
-                macd_not_new_low = hist >= mode_c2_min_macd
-                rsi_not_new_low = rsi >= mode_c2_min_rsi
-                turning_up = (hist > prev_hist) or (close_p > open_p)
-
-                if macd_not_new_low and rsi_not_new_low and turning_up:
-                    act = "🟢 模式C2:止跌重新建倉(半倉)"
-                    rsn = f"MACD與RSI未再破底且出現回升跡象，建立50%半倉，啟動C2硬防守"
+            # 3. 處理模式 B 之 T+1 延遲建倉
+            elif mode_b_pending:
+                if cond_bear_or_underwater:
+                    act = "🚫 模式B建倉取消(市場環境轉壞)"
+                    rsn = "預備執行模式B建倉當日陷入熊市或MACD水下狀態，取消建倉"
+                    mode_b_pending = False
+                elif cond_high_divergence:
+                    act = "⚠️ 模式B建倉取消(高檔背離)"
+                    rsn = "預備執行模式B建倉當日觸發高檔極致背離，取消建倉"
+                elif cond_weak_hook:
+                    act = "⚠️ 模式B建倉取消(弱勢勾頭)"
+                    rsn = "預備執行模式B建倉當日觸發弱勢勾頭否決，取消建倉"
+                else:
+                    act = "🟢 模式B:強勢回檔(隔日執行建半倉)"
+                    rsn = f"前一交易日滿足【模式B】條件，今日情緒過後正式執行買入50%半倉"
                     last_buy_index = i
                     entry_index = i
                     entry_price = close_p
-                    entry_low = low_p
+                    entry_low = mode_b_pending_low
                     entry_temp = temp_val
+                    entry_rsi = rsi
                     in_position = True
                     position_ratio = 0.5
-                    entry_mode = "C2"
-                    mode_c2_reentry_pending = False
-                else:
-                    act = "⏳ 模式C2等待止跌訊號"
-                    rsn = f"持續追蹤MACD與RSI底部"
+                    entry_mode = "B"
+                    mode_b_pending = False
 
-            elif not in_position and mode_a_reentry_pending:
-                if (low_p <= bb_l) and (low_p < mode_a_min_low_since_entry):
-                    act = "🟢 模式A:觸底重建(30%防守倉)"
-                    rsn = f"觸及布林下軌且跌破前次新低，重新建立30%防守型底倉"
+            # 4. 加倉機制檢測 (市場起立:準備起飛)
+            elif (position_ratio in [0.2, 0.5]) and (close_p > m20) and (bb_u_diff5 > 0):
+                if i < mode_c_reduce_cooldown_until:
+                    act = "🚫 暫停加倉(減倉冷卻期中)"
+                    rsn = f"觸發減倉機制，冷卻期內(剩餘{mode_c_reduce_cooldown_until - i}日)禁止加倉"
+                else:
+                    act = "🚀 市場起立:準備起飛(加碼補滿倉)"
+                    rsn = f"已持倉({int(position_ratio*100)}%)，股價站上MA20(${m20:.2f})且布林上軌5日持續擴張，補滿至100%滿倉"
+                    last_buy_index = i
+                    position_ratio = 1.0
+
+            # 5. 新進場觸發檢測 (包含觸碰布林下軌破新低之重新建倉)
+            elif not in_position and (mode_a_bbl_rebuy_signal or not cd_buy_active):
+                # 優先判定: 觸碰布林下軌且創近15日新低重開模式A
+                if mode_a_bbl_rebuy_signal:
+                    act = "🟢 模式A:觸下軌破新低(重新建半倉)"
+                    rsn = f"當日最低價(${low_p:.2f})跌破布林下軌(${bb_l:.2f})且創近15日新低，觸發模式A重新建立50%半倉"
                     last_buy_index = i
                     entry_index = i
                     entry_price = close_p
                     entry_low = low_p
                     entry_temp = temp_val
+                    entry_rsi = rsi
                     in_position = True
-                    position_ratio = 0.3
+                    position_ratio = 0.5
                     entry_mode = "A"
-                    mode_a_failed_breakout_ma20 = False
-                    mode_a_reentry_pending = False
-                    mode_a_min_low_since_entry = low_p
-                else:
-                    act = "⏳ 模式A等待觸底新低"
-                    rsn = f"持續等待股價觸碰布林下軌並創新低"
+                    mode_a_touched_ma20 = False
 
-            # 第四優先：常規建倉
-            elif not in_position and not cd_buy_active:
-                if mode_a_buy_signal:
-                    act = "🟢 模式A:極端超賣與底部確認(建防守底倉30%)"
-                    rsn = f"極端超賣伴隨觸底且收盤實體回收，動能止穩，建立30%防守型底倉"
+                # 標準模式 A 觸發
+                elif mode_a_buy_signal:
+                    act = "🟢 模式A:超賣強彈(建半倉)"
+                    rsn = f"【模式A抄底】近5日出現RSI<30，當日RSI大漲{rsi_diff_1:.1f}點(>=8)，建立50%半倉"
                     last_buy_index = i
                     entry_index = i
                     entry_price = close_p
                     entry_low = low_p
                     entry_temp = temp_val
+                    entry_rsi = rsi
                     in_position = True
-                    position_ratio = 0.3
+                    position_ratio = 0.5
                     entry_mode = "A"
-                    mode_a_failed_breakout_ma20 = False
-                    mode_a_reentry_pending = False
-                    mode_a_min_low_since_entry = low_p
+                    mode_a_touched_ma20 = False
 
-                elif mode_b_buy_stage1:
+                # 試驗模式 B
+                elif mode_b_buy_signal:
                     if cond_bear_or_underwater:
-                        act = "🚫 模式B被禁用(空頭/水下)"
-                        rsn = "季線下彎或MACD處於水下，全面禁止B模式建倉"
+                        act = "🚫 模式B被禁用(熊市/MACD水下)"
+                        rsn = "季線向下且股價在季線下，或MACD雙線在水下，全面禁止模式B建倉"
                     elif cond_high_divergence:
                         act = "⚠️ 模式B被否決(高檔背離)"
-                        rsn = "乖離季線過大且溫度>75度，否決建倉"
+                        rsn = "股價遠離季線>=25%且溫度>75度，觸發高檔背離否決"
                     elif cond_weak_hook:
-                        act = "⚠️ 模式B被否決(動能衰退)"
-                        rsn = "溫度10日線下滑且低於50度，否決建倉"
+                        act = "⚠️ 模式B被否決(弱勢勾頭)"
+                        rsn = "市場溫度10日線下滑且溫度<50度，屬動能失血，拒絕開倉"
                     else:
-                        act = "🟢 模式B:多頭回踩站回確認(建觀察底倉30%)"
-                        rsn = f"月線季線多頭排列，股價回踩後重新以高質量紅K站回MA20與MA5，動能穩健，投入30%底倉"
-                        last_buy_index = i
-                        entry_index = i
-                        entry_price = close_p
-                        entry_low = low_p
-                        entry_temp = temp_val
-                        in_position = True
-                        position_ratio = 0.3
-                        entry_mode = "B"
-                        mode_b_stage = 1
+                        act = "🟡 模式B條件成立(等待隔日建倉)"
+                        rsn = f"【模式B強勢回檔】條件成立！市場情緒過高，將於下一交易日執行建倉"
+                        mode_b_pending = True
+                        mode_b_pending_low = low_p
 
+                # 試驗模式 C (建倉條件: 溫度須小於85)
                 elif mode_c_buy_signal:
                     if cond_bear_or_underwater:
-                        act = "🚫 模式C被禁用(空頭/水下)"
-                        rsn = "季線下彎或MACD處於水下，全面禁止C模式追高"
+                        act = "🚫 模式C被禁用(熊市/MACD水下)"
+                        rsn = "季線向下且股價在季線下，或MACD雙線在水下，全面禁止模式C追高突破"
                     elif cond_weak_hook:
-                        act = "⚠️ 模式C被否決(動能衰退)"
-                        rsn = "溫度10日線下滑且低於50度，否決建倉"
+                        act = "⚠️ 模式C被否決(弱勢勾頭)"
+                        rsn = "市場溫度10日線下滑且溫度<50度，拒絕開倉"
                     else:
-                        act = "🟢 模式C:平台突破(半倉)"
-                        rsn = f"均線多頭排列創15日新高，且溫度尚未過熱，建立50%半倉"
+                        act = "🟢 模式C:平台突破(建半倉)"
+                        rsn = f"【模式C平台突破】多頭排列下創15日新高、溫度({temp_val:.1f}<85)且收盤達布林上軌0.995倍，開倉50%半倉"
                         last_buy_index = i
                         entry_index = i
                         entry_price = close_p
                         entry_low = low_p
                         entry_temp = temp_val
+                        entry_rsi = rsi
                         in_position = True
                         position_ratio = 0.5
                         entry_mode = "C"
 
             elif in_position:
-                if entry_mode == "C2":
-                    act = f"✊ 模式C2硬防守續抱中"
-                    rsn = f"持倉{int(position_ratio*100)}%，停損設於建倉價3%，等待MACD大於2回歸C模式"
-                elif entry_mode == "A":
-                    act = f"✊ 模式A底部防守續抱中"
-                    rsn = f"當前持倉{int(position_ratio*100)}%，尚未觸發硬性停損與時間出場條件"
-                else:
-                    act = f"✊ 模式{entry_mode}續抱中"
-                    rsn = f"當前持倉{int(position_ratio*100)}%，未觸發清倉或減倉條件"
+                act = f"✊ 模式{entry_mode}續抱中"
+                rsn = f"當前持倉{int(position_ratio*100)}%，未觸發清倉或減倉條件，行情運作正常"
 
             action_list.append(act)
             reason_list.append(rsn)
@@ -857,9 +781,11 @@ class TechnicalAnalysisEngine:
         
         close_p = latest['Close']
         high_p = latest['High']
+        low_p = latest['Low']
         m20 = latest['MA20']
         m60 = latest['MA60']
         bb_u = latest['BB_Upper']
+        bb_l = latest['BB_Lower']
         bw = latest['BB_Bandwidth']
         rsi = latest['RSI14']
         dif = latest['DIF']
@@ -870,12 +796,11 @@ class TechnicalAnalysisEngine:
         temp_ma10 = latest['Temperature_MA10']
 
         is_high_temp = temp >= 75.0
+        is_rsi_overbought = rsi >= 70.0
         is_rsi_oversold = rsi <= 35.0
         macd_gc = (dif > dea) and (prev_1['DIF'] <= prev_1['DEA'])
         macd_dc = (dif < dea) and (prev_1['DIF'] >= prev_1['DEA'])
         
-        prev_4d_macd_avg = df['MACD_Hist'].iloc[-5:-1].mean() if len(df) >= 5 else 0.0
-
         if (close_p > m20) and (m20 > m60) and (45.0 <= rsi <= 62.0) and (dif > dea) and not is_high_temp:
             setup_status = "🟢 極佳 (順勢發動)"
         elif is_rsi_oversold and (hist > prev_hist):
@@ -883,7 +808,7 @@ class TechnicalAnalysisEngine:
         elif is_high_temp or (rsi > 68.0):
             setup_status = "🔴 偏低 (過熱追高險)"
         elif (close_p < m60) or ((dif < 0) and (dea < 0)):
-            setup_status = "🔴 不宜 (空頭/水下)"
+            setup_status = "🔴 不宜 (熊市/水下空頭)"
         else:
             setup_status = "🟡 一般 (震盪觀望)"
 
@@ -891,12 +816,15 @@ class TechnicalAnalysisEngine:
         if temp > 88.0 and (high_p > bb_u * 1.05):
             alerts.append("🛑 極致過熱警報(溫度>88且超布林5%)")
 
+        if low_p <= bb_l:
+            alerts.append("🎯 觸及布林下軌(關注模式A超賣重進場機會)")
+
         if macd_gc and is_high_temp:
             alerts.append("⚠️ MACD高位金叉(慎防高檔背離)")
         elif macd_gc:
             alerts.append("🟢 MACD零軸上金叉(多頭訊號)")
         
-        if macd_dc and (close_p < m20) and (prev_4d_macd_avg > 5.0):
+        if macd_dc and (close_p < m20):
             alerts.append("🛑 MACD死叉+跌破20日線(觸發100%清倉)")
             
         if (high_p >= bb_u) and (close_p < latest['Open']):
@@ -915,8 +843,8 @@ class TechnicalAnalysisEngine:
 
         if "極致過熱警報" in primary_alert:
             diag_detail = f"市場溫度達{temp:.1f}°C (>88.0)，且最高價超越布林上軌5%，觸發模式C極致過熱清倉條款。"
-        elif "跌破20日線" in primary_alert:
-            diag_detail = f"今日MACD轉死叉、跌破月線(${m20:.2f})，趨勢轉空，觸發策略100%清倉防禦條件。"
+        elif "MACD死叉+跌破20日線" in primary_alert:
+            diag_detail = f"今日MACD轉死叉且跌破月線(${m20:.2f})，觸發策略100%清倉防禦條件。"
         elif "高檔背離" in primary_alert or "從高檔彎頭" in primary_alert:
             diag_detail = f"市場溫度高達{temp:.1f}°C，股價遠離季線，慎防高檔背離拉回。"
         elif "順勢發動" in setup_status:
@@ -1132,9 +1060,9 @@ with tab1:
                         act_text = latest['Advice_Action']
                         rsn_text = latest['Advice_Reason']
                         
-                        if "100%清倉" in act_text or "離場" in act_text or "停損" in act_text or "過熱清倉" in act_text or "清倉" in act_text or "強弩之末" in act_text or "取消底倉" in act_text:
+                        if "100%清倉" in act_text or "離場" in act_text or "停損" in act_text or "受阻回踩清倉" in act_text or "極致過熱清倉" in act_text:
                             st.error(f"**【操作建議】{act_text}** — {rsn_text}")
-                        elif "被禁用" in act_text or "否決" in act_text or "減倉" in act_text or "取消" in act_text or "等待" in act_text:
+                        elif "被禁用" in act_text or "否決" in act_text or "減倉" in act_text or "取消" in act_text:
                             st.warning(f"**【操作建議】{act_text}** — {rsn_text}")
                         elif "模式" in act_text or "建倉" in act_text or "補滿倉" in act_text or "續抱" in act_text:
                             st.success(f"**【操作建議】{act_text}** — {rsn_text}")
@@ -1224,7 +1152,7 @@ with tab1:
                         fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Temperature'], mode='lines', name='溫度 T', line=dict(color='#FF3D00', width=2)), row=2, col=1)
                         fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Temperature_MA10'], mode='lines', name='溫度 T 10日均線', line=dict(color='#FFA726', width=1, dash='dot')), row=2, col=1)
                         fig.add_hline(y=88, line_dash="dash", line_color="#D50000", row=2, col=1)
-                        fig.add_hline(y=85, line_dash="dash", line_color="#FF5722", row=2, col=1)
+                        fig.add_hline(y=85, line_dash="dash", line_color="#FF6D00", row=2, col=1)
                         fig.add_hline(y=75, line_dash="dash", line_color="#FF1744", row=2, col=1)
                         fig.add_hline(y=50, line_dash="dash", line_color="#00E676", row=2, col=1)
 
@@ -1265,17 +1193,7 @@ with tab1:
                         }
                         
                         display_df = show_df[show_cols].rename(columns=rename_dict).sort_index(ascending=False)
-
-                        st.dataframe(
-                            display_df,
-                            use_container_width=True,
-                            column_config={
-                                "5日格局原因": st.column_config.TextColumn("5日格局原因", width="large"),
-                                "20日格局原因": st.column_config.TextColumn("20日格局原因", width="large"),
-                                "操作建議": st.column_config.TextColumn("操作建議", width="large"),
-                                "策略分析原因": st.column_config.TextColumn("策略分析原因", width="large"),
-                            }
-                        )
+                        st.dataframe(display_df, use_container_width=True)
 
             except Exception as ex:
                 st.error(f"載入數據失敗: {ex}")
@@ -1326,7 +1244,7 @@ with tab2:
                         ret_3m = ((curr_close - prev_3m_close) / prev_3m_close * 100.0) if not np.isnan(prev_3m_close) else np.nan
 
                         prev_1y_close = df_calc['Close'].iloc[latest_idx - 240] if latest_idx >= 240 else np.nan
-                        ret_1y = ((curr_close - prev_1y_close) / prev_1y_close * 100.0) if not np.isnan(ret_1y) else np.nan
+                        ret_1y = ((curr_close - prev_1y_close) / prev_1y_close * 100.0) if not np.isnan(prev_1y_close) else np.nan
 
                         setup_status, alert_msg, diag_desc = TechnicalAnalysisEngine.analyze_daily_radar(df_calc)
 
