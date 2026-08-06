@@ -71,7 +71,6 @@ class MultiSourceMarketData:
         if df.empty:
             raise ValueError(f"無法獲取 {symbol} 行情數據，請確認代碼是否正確。")
 
-        # 針對台股標的試圖獲取證交所 (TWSE) 盤中即時股價
         if symbol.endswith(".TW") or symbol.endswith(".TWO"):
             try:
                 rt_data = self._fetch_twse_realtime(clean_code, symbol.endswith(".TWO"))
@@ -385,7 +384,7 @@ class TechnicalAnalysisEngine:
         df['Reason_20D'] = trend_reason_20d
 
         # ----------------------------------------------------
-        # 核心策略回測邏輯 (含模式A弱死亡新特徵)
+        # 核心策略回測邏輯 (含模式A新功能規則)
         # ----------------------------------------------------
         action_list = []
         reason_list = []
@@ -401,6 +400,12 @@ class TechnicalAnalysisEngine:
         entry_index = -999
         entry_temp = 0.0
         entry_rsi = 0.0
+        
+        # 模式 A 新增狀態變數
+        mode_a_ma20_fail_flag = False      # 記錄建倉7天內是否曾出現靠近MA20陽線且未突破
+        mode_a_search_new_low = False     # 是否開啟尋找新低點機制
+        mode_a_search_start_idx = -999    # 開啟尋找新低點的索引位置
+        mode_a_last_exit_min_low = 999999.0 # 清倉時或清倉前的低點基準
         
         mode_b_pending = False
         mode_b_pending_low = 0.0
@@ -429,11 +434,13 @@ class TechnicalAnalysisEngine:
             low_p = df['Low'].iloc[i]
 
             m5 = df['MA5'].iloc[i]
+            m10 = df['MA10'].iloc[i]
             m20 = df['MA20'].iloc[i]
             m60 = df['MA60'].iloc[i]
             m20_diff = df['MA20_Diff_1D'].iloc[i]
 
             bb_u = df['BB_Upper'].iloc[i]
+            bb_l = df['BB_Lower'].iloc[i]
             bb_u_diff5 = df['BB_Upper_5D_Diff'].iloc[i]
             bw = df['BB_Bandwidth'].iloc[i]
 
@@ -501,7 +508,7 @@ class TechnicalAnalysisEngine:
             # 清倉 2: 模式 A 虛高放棄建倉
             mode_a_fake_high_exit = (entry_mode == "A") and (temp_val > 80.0) and (close_p < entry_price * 1.03)
 
-            # 清倉 2.5: 模式 A 弱死亡放棄建倉 (新增)
+            # 清倉 2.5: 模式 A 弱死亡放棄建倉
             days_since_entry = i - entry_index
             is_mode_a_day4 = in_position and (entry_mode == "A") and (days_since_entry == 4)
             if is_mode_a_day4:
@@ -511,6 +518,17 @@ class TechnicalAnalysisEngine:
                 mode_a_weak_death_exit = temp_no_new_high and temp_and_rsi_declining
             else:
                 mode_a_weak_death_exit = False
+
+            # 清倉 2.6 (新增): 模式 A 建倉 7 天內靠近 MA20 未破且跌破 MA5，需配合 MA10 > MA5
+            mode_a_ma20_fail_exit = False
+            if in_position and (entry_mode == "A") and (1 <= days_since_entry <= 7):
+                is_yang_near_ma20 = (close_p > open_p) and (high_p >= m20 * 0.985) and (close_p < m20)
+                if is_yang_near_ma20:
+                    mode_a_ma20_fail_flag = True
+
+                if mode_a_ma20_fail_flag and (close_p < m5):
+                    if m10 > m5:
+                        mode_a_ma20_fail_exit = True
 
             # 清倉 3: 模式 B 高位獲利清倉
             close_20d_max = df['Close'].iloc[max(0, i-19):i+1].max()
@@ -530,12 +548,16 @@ class TechnicalAnalysisEngine:
             mode_c_reduce_trigger = (entry_mode == "C") and (position_ratio == 1.0) and (temp_drop_3d > 20.0)
 
             # ----------------------------------------------------
-            # 邏輯判定順序 (清倉 > 減倉 > T+1建倉 > 新訊號觸發)
+            # 邏輯判定順序 (清倉 > 減倉 > T+1建倉 > 新低點重新建倉 > 新訊號觸發)
             # ----------------------------------------------------
             act = "觀望待變"
             rsn = "指標未符合任何建倉或調整條件"
 
-            # 1. 七大清倉機制優先檢測
+            # 檢查模式 A 尋找新低點機制是否逾期 (最多7天)
+            if mode_a_search_new_low and (i - mode_a_search_start_idx > 7):
+                mode_a_search_new_low = False
+
+            # 1. 各項清倉機制優先檢測
             if macd_dc_and_below_ma20 and in_position:
                 act = "🛑 100%清倉(MACD死叉+跌破MA20)"
                 rsn = f"MACD出現死叉且收盤價(${close_p:.2f})跌破MA20(${m20:.2f})，趨勢轉空，無條件全數清倉"
@@ -543,6 +565,20 @@ class TechnicalAnalysisEngine:
                 position_ratio = 0.0
                 entry_mode = ""
                 mode_b_pending = False
+                mode_a_ma20_fail_flag = False
+
+            elif mode_a_ma20_fail_exit and in_position:
+                act = "🛑 模式A觸碰MA20受阻跌破MA5清倉"
+                rsn = f"模式A建倉7天內陽線未能攻克MA20(${m20:.2f})，今日跌破MA5(${m5:.2f})且MA10(${m10:.2f})>MA5，執行清倉並開啟最長7天新低點鎖定"
+                in_position = False
+                position_ratio = 0.0
+                entry_mode = ""
+                mode_a_ma20_fail_flag = False
+                
+                # 啟用尋找新低點模式
+                mode_a_search_new_low = True
+                mode_a_search_start_idx = i
+                mode_a_last_exit_min_low = df['Low'].iloc[entry_index:i+1].min()
 
             elif mode_a_fake_high_exit and in_position:
                 act = "🛑 模式A虛高清倉"
@@ -550,6 +586,7 @@ class TechnicalAnalysisEngine:
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
+                mode_a_ma20_fail_flag = False
 
             elif mode_a_weak_death_exit and in_position:
                 act = "🛑 模式A弱死亡清倉"
@@ -557,6 +594,7 @@ class TechnicalAnalysisEngine:
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
+                mode_a_ma20_fail_flag = False
 
             elif mode_b_exit_near_high and in_position:
                 act = "🛑 模式B高位獲利清倉"
@@ -623,7 +661,31 @@ class TechnicalAnalysisEngine:
                     last_buy_index = i
                     position_ratio = 1.0
 
-            # 5. 新進場觸發檢測
+            # 5. 模式 A 觸發「尋找新低點」重新建倉
+            elif not in_position and mode_a_search_new_low:
+                days_searching = i - mode_a_search_start_idx
+                is_touch_bb_lower = low_p <= bb_l * 1.005
+                is_new_low = low_p < mode_a_last_exit_min_low
+                
+                if is_touch_bb_lower and is_new_low:
+                    act = "🟢 模式A:觸碰布林下軌新低(重新建半倉)"
+                    rsn = f"【模式A新低建倉】清倉後第{days_searching}天觸及布林下軌(${bb_l:.2f})並創出新低價(${low_p:.2f})，重新執行模式A建半倉"
+                    last_buy_index = i
+                    entry_index = i
+                    entry_price = close_p
+                    entry_low = low_p
+                    entry_temp = temp_val
+                    entry_rsi = rsi
+                    in_position = True
+                    position_ratio = 0.5
+                    entry_mode = "A"
+                    mode_a_search_new_low = False
+                    mode_a_ma20_fail_flag = False
+                else:
+                    act = "🔍 模式A尋找新低點中"
+                    rsn = f"離場後尋找新低點第{days_searching}/7天，等待股價觸及布林下軌(${bb_l:.2f})並跌破前低(${mode_a_last_exit_min_low:.2f})"
+
+            # 6. 新進場觸發檢測
             elif not in_position and not cd_buy_active:
                 # 試驗模式 A
                 if mode_a_buy_signal:
@@ -638,6 +700,7 @@ class TechnicalAnalysisEngine:
                     in_position = True
                     position_ratio = 0.5
                     entry_mode = "A"
+                    mode_a_ma20_fail_flag = False
 
                 # 試驗模式 B (須經由否決機制篩選，並於隔日建倉)
                 elif mode_b_buy_signal:
@@ -645,7 +708,7 @@ class TechnicalAnalysisEngine:
                         act = "🚫 模式B被禁用(熊市/MACD水下)"
                         rsn = "季線向下且股價在季線下，或MACD雙線在水下，全面禁止模式B建倉"
                     elif cond_high_divergence:
-                        act = "⚠️ 模式B被否決(高檔極致背離)"
+                        act = "⚠️ 模式B被否決(高檔背離)"
                         rsn = "股價遠離季線>=25%且溫度>75度，觸發高檔背離否決"
                     elif cond_weak_hook:
                         act = "⚠️ 模式B被否決(弱勢勾頭)"
@@ -678,8 +741,12 @@ class TechnicalAnalysisEngine:
                         entry_mode = "C"
 
             elif in_position:
-                act = f"✊ 模式{entry_mode}續抱中"
-                rsn = f"當前持倉{int(position_ratio*100)}%，未觸發清倉或減倉條件，行情運作正常"
+                if entry_mode == "A" and 1 <= days_since_entry <= 7 and mode_a_ma20_fail_flag and (close_p < m5) and (m10 <= m5):
+                    act = f"✊ 模式A續抱中(MA10<=MA5免清倉)"
+                    rsn = f"模式A建倉7天內衝擊MA20受阻且今日跌破MA5，但因MA10({m10:.2f})<=MA5({m5:.2f})，不觸發清倉繼續持有"
+                else:
+                    act = f"✊ 模式{entry_mode}續抱中"
+                    rsn = f"當前持倉{int(position_ratio*100)}%，未觸發清倉或減倉條件，行情運作正常"
 
             action_list.append(act)
             reason_list.append(rsn)
@@ -1094,7 +1161,6 @@ with tab1:
                         show_df['RSI(14)'] = show_df['RSI14'].round(2)
                         show_df['MACD柱狀'] = show_df['MACD_Hist'].round(3)
                         
-                        # 在顯示欄位清單 (show_cols) 中加入了 'MACD柱狀'
                         show_cols = ["Open", "High", "Low", "Close", "Volume", "市場溫度 T", "RSI(14)", "MACD柱狀", "Reason_5D", "Reason_20D", "Advice_Action", "Advice_Reason"]
                         rename_dict = {
                             "Reason_5D": "5日格局原因",
