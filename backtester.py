@@ -384,7 +384,7 @@ class TechnicalAnalysisEngine:
         df['Reason_20D'] = trend_reason_20d
 
         # ----------------------------------------------------
-        # 核心策略回測邏輯 (含模式 C2 機制)
+        # 核心策略回測邏輯
         # ----------------------------------------------------
         action_list = []
         reason_list = []
@@ -510,17 +510,17 @@ class TechnicalAnalysisEngine:
 
             days_since_entry = i - entry_index
 
-            # 更新模式 A 持倉期間最低價，以及判定「兩周內(10交易日內)是否有靠近 MA20 的陽線且收盤價無法突破 MA20」
+            # 更新模式 A 持倉期間最低價，以及判定「建倉後一周內(5交易日內)是否有靠近 MA20 的陽線且收盤價無法突破 MA20」
             if in_position and entry_mode == "A":
                 mode_a_min_low_since_entry = min(mode_a_min_low_since_entry, low_p)
-                if days_since_entry <= 10:
+                if days_since_entry <= 5:
                     is_bull_k_near_ma20 = (close_p > open_p) and (high_p >= m20 * 0.98) and (close_p < m20)
                     if is_bull_k_near_ma20:
                         mode_a_failed_breakout_ma20 = True
 
-            # 模式 A 清倉：滿足兩周內突破失敗後，後續跌破 MA5 且當日 MA10 > MA5
+            # 模式 A 清倉：滿足建倉一周內突破失敗，且「依然在一周內(days_since_entry <= 5)」跌破 MA5 且當日 MA10 > MA5
             mode_a_ma20_ma5_exit = False
-            if in_position and entry_mode == "A" and mode_a_failed_breakout_ma20:
+            if in_position and entry_mode == "A" and mode_a_failed_breakout_ma20 and (days_since_entry <= 5):
                 if (close_p < m5 or low_p <= m5) and (m10 > m5):
                     mode_a_ma20_ma5_exit = True
 
@@ -569,7 +569,7 @@ class TechnicalAnalysisEngine:
                 (high_p > bb_u * 1.05)
             )
 
-            # 新增清倉 4.6: 模式 C 創新高後單日 MACD 驟降清倉 (觸發 C2 建倉預備)
+            # 清倉 4.6: 模式 C 創新高後單日 MACD 驟降清倉
             macd_drop = prev_hist - hist
             mode_c_spike_drop_exit = (
                 in_position and 
@@ -582,18 +582,16 @@ class TechnicalAnalysisEngine:
             # 清倉 5: 模式 B/C 三日認錯停損 (C2 模式下不適用)
             mode_bc_3d_failed = in_position and (entry_mode in ["B", "C"]) and (1 <= days_since_entry <= 3) and (close_p < entry_low)
 
-            # 新增清倉 6: C2 模式專屬 3% 硬停損
+            # 清倉 6: C2 模式專屬 3% 硬停損
             mode_c2_loss_3pct_exit = in_position and (entry_mode == "C2") and (close_p < entry_price * 0.97)
 
             # ----------------------------------------------------
             # C2 狀態維護與模式切換 logic
             # ----------------------------------------------------
-            # 更新等待 C2 建倉期間的 MACD 與 RSI 最低值
             if not in_position and mode_c2_reentry_pending:
                 mode_c2_min_macd = min(mode_c2_min_macd, hist)
                 mode_c2_min_rsi = min(mode_c2_min_rsi, rsi)
 
-            # 當 C2 持倉中且 MACD 重新突破大於 2 時，回歸正常模式 C
             if in_position and (entry_mode == "C2") and (hist > 2.0):
                 entry_mode = "C"
 
@@ -651,8 +649,8 @@ class TechnicalAnalysisEngine:
                 entry_mode = ""
 
             elif mode_a_ma20_ma5_exit and in_position:
-                act = "🛑 模式A兩周內MA20突破失敗+跌破MA5(MA10>MA5)清倉"
-                rsn = f"模式A建倉後兩周內陽線靠近MA20(${m20:.2f})無法突破，今日跌破5日線(${m5:.2f})且當日MA10(${m10:.2f})>MA5(${m5:.2f})，判定反彈無力全數清倉，等待觸碰布林下軌創新低重進"
+                act = "🛑 模式A建倉一周內MA20突破失敗+跌破MA5(MA10>MA5)清倉"
+                rsn = f"模式A建倉一週內陽線靠近MA20(${m20:.2f})無法突破，且依然在一週內跌破5日線(${m5:.2f})且當日MA10(${m10:.2f})>MA5(${m5:.2f})，判定反彈無力全數清倉，等待觸碰布林下軌創新低重進"
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
@@ -729,7 +727,6 @@ class TechnicalAnalysisEngine:
 
             # 4. 模式 C2 重新建倉檢測
             elif not in_position and mode_c2_reentry_pending:
-                # 條件：MACD未再創新低 且 RSI未再創新低，並且出現當日回升訊號
                 macd_not_new_low = hist >= mode_c2_min_macd
                 rsi_not_new_low = rsi >= mode_c2_min_rsi
                 turning_up = (hist > prev_hist) or (close_p > open_p)
