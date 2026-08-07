@@ -759,7 +759,7 @@ class TechnicalAnalysisEngine:
         return df
 
     # ----------------------------------------------------
-    # 💡 新增：空倉者當日建倉適性診斷（獨立評估）
+    # 💡 空倉者當日建倉適性診斷
     # ----------------------------------------------------
     @staticmethod
     def diagnose_flat_position_entry(df: pd.DataFrame) -> tuple[str, str]:
@@ -849,6 +849,74 @@ class TechnicalAnalysisEngine:
             return "⚠️ 今日無適合建倉模式 (觸發否決)", f"雖然技術型態接近，但因【{'; '.join(reasons)}】被系統否決開倉"
 
         return "🟡 今日無符合之建倉模式", "目前技術面未觸發模式A/B/C之任何建倉訊號，空倉者請繼續保持觀望"
+
+    # ----------------------------------------------------
+    # 🔮 新增：明日極短線定向分析 (看多/看空/觀望)
+    # ----------------------------------------------------
+    @staticmethod
+    def predict_next_day_direction(df: pd.DataFrame) -> tuple[str, str]:
+        if len(df) < 5:
+            return "觀望 🟡", "資料不足"
+
+        latest = df.iloc[-1]
+        prev_1 = df.iloc[-2]
+
+        close_p = latest['Close']
+        m5 = latest['MA5']
+        m10 = latest['MA10']
+        rsi = latest['RSI14']
+        rsi_diff1 = latest['RSI_Diff_1D']
+        hist = latest['MACD_Hist']
+        prev_hist = prev_1['MACD_Hist']
+        temp = latest['Temperature']
+        prev_temp = prev_1['Temperature']
+
+        bull_score = 0
+        bear_score = 0
+
+        # 1. 均線與價格動能
+        if close_p > m5:
+            bull_score += 2
+        else:
+            bear_score += 2
+
+        if m5 > m10:
+            bull_score += 1
+        else:
+            bear_score += 1
+
+        # 2. MACD 柱狀體增減
+        hist_diff = hist - prev_hist
+        if hist_diff > 0:
+            bull_score += 2
+        else:
+            bear_score += 2
+
+        # 3. RSI 極短線走向
+        if rsi_diff1 > 0:
+            bull_score += 1
+        else:
+            bear_score += 1
+
+        if rsi >= 70.0:
+            bear_score += 1  # 短線超買修正風險
+        elif rsi <= 30.0:
+            bull_score += 1  # 短線超賣反彈機會
+
+        # 4. 市場溫度變化
+        if temp > prev_temp:
+            bull_score += 1
+        else:
+            bear_score += 1
+
+        # 判定
+        diff = bull_score - bear_score
+        if diff >= 3:
+            return "看多 🟢", "均線向上且短線動能增強"
+        elif diff <= -3:
+            return "看空 🔴", "短線轉弱或高檔動能背離"
+        else:
+            return "觀望 🟡", "多空訊號拉鋸，短線震盪"
 
     # ----------------------------------------------------
     # ⚡ 專屬雷達診斷引擎
@@ -1159,7 +1227,6 @@ with tab1:
                         st.markdown("---")
                         st.markdown("#### 💡 當前最新策略操作建議與動態提醒")
                         
-                        # 1. 呈現歷史回測延續的持倉建議
                         act_text = latest['Advice_Action']
                         rsn_text = latest['Advice_Reason']
                         
@@ -1172,7 +1239,6 @@ with tab1:
                         else:
                             st.info(f"**【歷史持倉建議】{act_text}** — {rsn_text}")
 
-                        # 2. 💡 新增：空倉者當日獨立建倉適性提示
                         flat_title, flat_desc = TechnicalAnalysisEngine.diagnose_flat_position_entry(df_calc)
                         if "🟢" in flat_title:
                             st.success(f"**【空倉者今日建議】{flat_title}** — {flat_desc}")
@@ -1184,7 +1250,8 @@ with tab1:
                         st.markdown("---")
                         st.markdown("#### 📊 最新市場指標總覽")
                         
-                        m1, m2, m3, m4, m5, m6 = st.columns([1.2, 1.3, 1.2, 1.2, 1.1, 1.1])
+                        # 調整為 7 欄 layout
+                        m1, m2, m3, m4, m5, m6, m7 = st.columns([1.1, 1.2, 1.1, 1.1, 1.0, 1.0, 1.1])
                         
                         temp_val = latest['Temperature']
                         m1.metric("市場動態溫度 T", f"{temp_val:.1f}°C")
@@ -1220,6 +1287,10 @@ with tab1:
 
                         b20_tag = "看多 🟢" if latest['Bull_20D'] else ("看空 🔴" if latest['Bear_20D'] else "震盪 🟡")
                         m6.metric("20日中期格局", b20_tag)
+
+                        # 新增第 7 個指標：明日極短線定向
+                        next_dir_tag, next_dir_desc = TechnicalAnalysisEngine.predict_next_day_direction(df_calc)
+                        m7.metric("明日極短線定向", next_dir_tag, next_dir_desc)
 
                         st.markdown("---")
                         st.markdown("#### 🔍 多空格局技術面原因解析")
