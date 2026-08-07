@@ -296,12 +296,17 @@ class TechnicalAnalysisEngine:
         df['RSI_Diff_2D'] = df['RSI14'].diff(2)
         df['RSI_Diff_5D'] = df['RSI14'].diff(5)
 
-        # 4. MACD 計算
+        # 4. MACD & PPO 計算
         ema12 = df['Close'].ewm(span=12, adjust=False).mean()
         ema26 = df['Close'].ewm(span=26, adjust=False).mean()
         df['DIF'] = ema12 - ema26
         df['DEA'] = df['DIF'].ewm(span=9, adjust=False).mean()
         df['MACD_Hist'] = (df['DIF'] - df['DEA']) * 2
+
+        # PPO (Percentage Price Oscillator)
+        df['PPO'] = ((ema12 - ema26) / ema26) * 100.0
+        df['PPO_Signal'] = df['PPO'].ewm(span=9, adjust=False).mean()
+        df['PPO_Hist'] = (df['PPO'] - df['PPO_Signal']) * 2.0
 
         # 5. 市場溫度 T 計算
         df['Ret20'] = df['Close'].pct_change(20)
@@ -759,7 +764,7 @@ class TechnicalAnalysisEngine:
         return df
 
     # ----------------------------------------------------
-    # 💡 空倉者當日建倉適性診斷
+    # 空倉者當日建倉適性診斷
     # ----------------------------------------------------
     @staticmethod
     def diagnose_flat_position_entry(df: pd.DataFrame) -> tuple[str, str]:
@@ -786,7 +791,6 @@ class TechnicalAnalysisEngine:
         temp_val = df['Temperature'].iloc[i]
         temp_ma10 = df['Temperature_MA10'].iloc[i]
 
-        # 否決條件
         is_ma60_down = m60 < df['MA60'].iloc[i-1]
         is_bear_market = is_ma60_down and (close_p < m60)
         is_macd_underwater = (dif < 0) and (dea < 0)
@@ -800,11 +804,9 @@ class TechnicalAnalysisEngine:
 
         cond_ma20_up_5d = m20_diff5 > 0
 
-        # 模式 A 檢查
         rsi_recent_oversold = (df['RSI14'].iloc[max(0, i-4):i+1] < 30.0).any()
         mode_a_signal = rsi_recent_oversold and (rsi_diff_1 >= 8.0)
 
-        # 模式 B 檢查
         cond_b_env = ((m20 > m60) or (dif > 0)) and (close_p > m60) and (dif > 0)
         cond_b_rsi = (40.0 <= prev_rsi <= 50.0) and (rsi_diff_1 > 0)
         touched_ma20_recent = (df['Low'].iloc[max(0, i-1):i+1] <= df['MA20'].iloc[max(0, i-1):i+1] * 1.015).any()
@@ -814,14 +816,12 @@ class TechnicalAnalysisEngine:
         )
         mode_b_signal = cond_b_env and cond_b_rsi and cond_b_price
 
-        # 模式 C 檢查
         close_15d_max = df['Close'].iloc[max(0, i-14):i].max() if i >= 15 else df['Close'].iloc[:i].max()
         cond_c_ma_align = (close_p > m20) and (m20 > m60) and cond_ma20_up_5d
         cond_c_new_high = close_p > close_15d_max
         cond_c_long_red = (close_p > open_p) and (close_p >= bb_u * 0.995)
         mode_c_signal = cond_c_ma_align and cond_c_new_high and cond_c_long_red
 
-        # 診斷判定
         reasons = []
         
         if mode_a_signal:
@@ -851,7 +851,7 @@ class TechnicalAnalysisEngine:
         return "🟡 今日無符合之建倉模式", "目前技術面未觸發模式A/B/C之任何建倉訊號，空倉者請繼續保持觀望"
 
     # ----------------------------------------------------
-    # 🔮 新增：明日極短線定向分析 (看多/看空/觀望)
+    # 明日極短線定向分析 (看多/看空/觀望)
     # ----------------------------------------------------
     @staticmethod
     def predict_next_day_direction(df: pd.DataFrame) -> tuple[str, str]:
@@ -874,7 +874,6 @@ class TechnicalAnalysisEngine:
         bull_score = 0
         bear_score = 0
 
-        # 1. 均線與價格動能
         if close_p > m5:
             bull_score += 2
         else:
@@ -885,31 +884,27 @@ class TechnicalAnalysisEngine:
         else:
             bear_score += 1
 
-        # 2. MACD 柱狀體增減
         hist_diff = hist - prev_hist
         if hist_diff > 0:
             bull_score += 2
         else:
             bear_score += 2
 
-        # 3. RSI 極短線走向
         if rsi_diff1 > 0:
             bull_score += 1
         else:
             bear_score += 1
 
         if rsi >= 70.0:
-            bear_score += 1  # 短線超買修正風險
+            bear_score += 1
         elif rsi <= 30.0:
-            bull_score += 1  # 短線超賣反彈機會
+            bull_score += 1
 
-        # 4. 市場溫度變化
         if temp > prev_temp:
             bull_score += 1
         else:
             bear_score += 1
 
-        # 判定
         diff = bull_score - bear_score
         if diff >= 3:
             return "看多 🟢", "均線向上且短線動能增強"
@@ -1250,7 +1245,6 @@ with tab1:
                         st.markdown("---")
                         st.markdown("#### 📊 最新市場指標總覽")
                         
-                        # 調整為 7 欄 layout
                         m1, m2, m3, m4, m5, m6, m7 = st.columns([1.1, 1.2, 1.1, 1.1, 1.0, 1.0, 1.1])
                         
                         temp_val = latest['Temperature']
@@ -1288,7 +1282,6 @@ with tab1:
                         b20_tag = "看多 🟢" if latest['Bull_20D'] else ("看空 🔴" if latest['Bear_20D'] else "震盪 🟡")
                         m6.metric("20日中期格局", b20_tag)
 
-                        # 新增第 7 個指標：明日極短線定向
                         next_dir_tag, next_dir_desc = TechnicalAnalysisEngine.predict_next_day_direction(df_calc)
                         m7.metric("明日極短線定向", next_dir_tag, next_dir_desc)
 
@@ -1301,18 +1294,19 @@ with tab1:
                             st.info(f"**📌 20日中期格局原因：** {latest['Reason_20D']}")
 
                         st.markdown("---")
-                        st.markdown("#### 🎯 K線、市場溫度、RSI、MACD 與 策略績效淨值曲線 五圖對照")
+                        st.markdown("#### 🎯 K線、市場溫度、RSI、MACD、PPO 與 策略績效淨值曲線 六圖對照")
 
                         fig = make_subplots(
-                            rows=5, cols=1, 
+                            rows=6, cols=1, 
                             shared_xaxes=True, 
-                            vertical_spacing=0.025, 
-                            row_heights=[0.35, 0.15, 0.15, 0.15, 0.2],
+                            vertical_spacing=0.02, 
+                            row_heights=[0.3, 0.12, 0.12, 0.12, 0.14, 0.2],
                             subplot_titles=(
                                 f"{bt_symbol} K線、MA5/10/20/60 均線與布林通道", 
                                 "動態市場溫度 T (0-100)", 
                                 "RSI(14) 指標", 
                                 "MACD 指標 (DIF, DEA, 柱狀圖)",
+                                "PPO 指標 (Percentage Price Oscillator)",
                                 "累積收益率淨值曲線對比 (初始基準 = 1.0)"
                             )
                         )
@@ -1354,16 +1348,23 @@ with tab1:
                         fig.add_trace(go.Bar(x=df_sub.index, y=df_sub['MACD_Hist'], name='MACD 柱狀圖', marker_color=macd_colors), row=4, col=1)
                         fig.add_hline(y=0, line_dash="solid", line_color="#9E9E9E", row=4, col=1)
 
-                        # Row 5: 淨值曲線
-                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Strategy_Equity'], mode='lines', name='策略動態淨值', line=dict(color='#2E7D32', width=2)), row=5, col=1)
-                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['BH_Equity'], mode='lines', name='買入持有淨值', line=dict(color='#757575', width=1.5, dash='dot')), row=5, col=1)
-                        fig.add_hline(y=1.0, line_dash="solid", line_color="#E0E0E0", row=5, col=1)
+                        # Row 5: PPO 圖表 (新增)
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['PPO'], mode='lines', name='PPO 快線 (%)', line=dict(color='#8E24AA', width=1.2)), row=5, col=1)
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['PPO_Signal'], mode='lines', name='PPO 訊號線', line=dict(color='#F57C00', width=1.2)), row=5, col=1)
+                        ppo_colors = ['#26a69a' if ph >= 0 else '#ef5350' for ph in df_sub['PPO_Hist']]
+                        fig.add_trace(go.Bar(x=df_sub.index, y=df_sub['PPO_Hist'], name='PPO 柱狀圖', marker_color=ppo_colors), row=5, col=1)
+                        fig.add_hline(y=0, line_dash="solid", line_color="#9E9E9E", row=5, col=1)
+
+                        # Row 6: 淨值曲線
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Strategy_Equity'], mode='lines', name='策略動態淨值', line=dict(color='#2E7D32', width=2)), row=6, col=1)
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['BH_Equity'], mode='lines', name='買入持有淨值', line=dict(color='#757575', width=1.5, dash='dot')), row=6, col=1)
+                        fig.add_hline(y=1.0, line_dash="solid", line_color="#E0E0E0", row=6, col=1)
 
                         fig.update_layout(
                             xaxis_rangeslider_visible=False,
                             hovermode="x unified",
                             template="plotly_white",
-                            height=1000
+                            height=1150
                         )
                         st.plotly_chart(fig, use_container_width=True)
 
@@ -1373,10 +1374,10 @@ with tab1:
                         show_df = df_sub.copy()
                         show_df['市場溫度 T'] = show_df['Temperature'].round(1)
                         show_df['RSI(14)'] = show_df['RSI14'].round(2)
-                        show_df['MACD柱狀'] = show_df['MACD_Hist'].round(3)
+                        show_df['PPO柱狀'] = show_df['PPO_Hist'].round(3)  # 將 MACD柱狀 替換為 PPO柱狀
                         show_df['持倉比率'] = (show_df['Position_Ratio'] * 100).astype(int).astype(str) + "%"
                         
-                        show_cols = ["Open", "High", "Low", "Close", "Volume", "持倉比率", "市場溫度 T", "RSI(14)", "MACD柱狀", "Reason_5D", "Reason_20D", "Advice_Action", "Advice_Reason"]
+                        show_cols = ["Open", "High", "Low", "Close", "Volume", "持倉比率", "市場溫度 T", "RSI(14)", "PPO柱狀", "Reason_5D", "Reason_20D", "Advice_Action", "Advice_Reason"]
                         rename_dict = {
                             "Reason_5D": "5日格局原因",
                             "Reason_20D": "20日格局原因",
