@@ -663,7 +663,7 @@ class TechnicalAnalysisEngine:
             nh_back_to_boll_mid_with_volume = nh_active and (close_p < m20) and (volume_ratio20 >= 1.20)
             
             # ==========================================
-            # 💡 新增：強勢主升浪判定 (MA10 完全遠離 MA20)
+            # 💡 強勢主升浪判定 (MA10 完全遠離 MA20)
             # ==========================================
             ma10_ma20_gap = m10 - m20
             is_strong_main_wave = (m10 > m20) and (m20 > m60) and (ma10_ma20_gap > atr14)
@@ -675,7 +675,35 @@ class TechnicalAnalysisEngine:
             nh_ma5_break_exempted = nh_active and nh_broke_ma5 and is_strong_main_wave
 
             nh_temp_guard_reduce = nh_active and temp_death_cross and nh_broke_ma5 and (position_ratio > 0.3)
-            nh_temp_final_exit = nh_active and temp_death_cross and (nh_broke_ma10 or nh_back_to_boll_mid_with_volume)
+            
+            # ==========================================
+            # 💡 新增：A 模式建倉 30 日內專屬主升浪結束濾網
+            # ==========================================
+            base_nh_temp_final_exit = nh_active and temp_death_cross and (nh_broke_ma10 or nh_back_to_boll_mid_with_volume)
+            
+            mode_a_final_exit_met = True
+            max_yang_low_val = 0.0
+            if in_position and (entry_mode == "A") and (days_since_entry <= 30):
+                start_idx = max(0, entry_index)
+                if i > start_idx:
+                    opens_arr = df['Open'].values[start_idx:i]
+                    closes_arr = df['Close'].values[start_idx:i]
+                    lows_arr = df['Low'].values[start_idx:i]
+                    
+                    bodies = closes_arr - opens_arr
+                    yang_idx = np.where(bodies > 0)[0]
+                    
+                    if len(yang_idx) > 0:
+                        longest_yang_idx = yang_idx[np.argmax(bodies[yang_idx])]
+                        max_yang_low_val = lows_arr[longest_yang_idx]
+                        is_yin_candle = close_p < open_p
+                        
+                        if not (is_yin_candle and low_p < max_yang_low_val):
+                            mode_a_final_exit_met = False
+            
+            nh_temp_final_exit = base_nh_temp_final_exit and mode_a_final_exit_met
+            nh_temp_final_exit_exempted = base_nh_temp_final_exit and not mode_a_final_exit_met
+            
             nh_temp_near_guard = nh_active and temp_near_death_cross and (position_ratio > 0)
 
             # ----------------------------------------------------
@@ -710,6 +738,10 @@ class TechnicalAnalysisEngine:
                 nh_active = False
                 nh_ma5_break_index = -999
                 nh_overheat_taken = False
+                
+            elif nh_temp_final_exit_exempted and in_position:
+                act = "🛡️ 模式A守門員豁免(未破大陽低點)"
+                rsn = f"出現溫度死叉與價格破位，但因模式A建倉30日內，當日陰線最低點(${low_p:.2f})未低於前方最長大陽線低點(${max_yang_low_val:.2f})，豁免主升浪結束清倉"
 
             elif nh_temp_guard_reduce and in_position:
                 act = "🧯 新高守門員降倉(溫度死叉+跌破MA5)"
@@ -726,9 +758,6 @@ class TechnicalAnalysisEngine:
                 rsn = f"創高後先看價格，今日收盤跌破MA5(${m5:.2f})，先止盈2至3層；是否清倉交給後續溫度死叉與MA10守門"
                 position_ratio = max(0.0, position_ratio - 0.3)
 
-            # ==========================================
-            # 💡 新增：攔截跌破 MA5 的動作，改為豁免狀態
-            # ==========================================
             elif nh_ma5_break_exempted and in_position:
                 act = "🛡️ 主升浪豁免(破MA5不減倉)"
                 rsn = f"收盤跌破MA5(${m5:.2f})，但判定 MA10(${m10:.2f}) 與 MA20(${m20:.2f}) 間距極寬(>1倍ATR)處於強勢主升浪，啟動洗盤豁免，維持當前持倉"
