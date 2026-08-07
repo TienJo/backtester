@@ -87,7 +87,6 @@ class MultiSourceMarketData:
                             "Volume": rt_data['Volume']
                         }], index=[rt_date])
                         df = pd.concat([df, new_row])
-                        df.sort_index(inplace=True)
                     src += " + 證交所(TWSE)盤中即時"
             except Exception:
                 pass
@@ -285,47 +284,24 @@ class TechnicalAnalysisEngine:
 
         # 2. 量能與量比
         df['Vol_MA5'] = df['Volume'].rolling(5).mean()
-        df['Vol_MA20'] = df['Volume'].rolling(20).mean()
         df['Daily_Vol_Ratio'] = df['Volume'] / df['Vol_MA5'].shift(1)
-        df['Daily_Vol_Ratio20'] = df['Volume'] / df['Vol_MA20'].shift(1)
 
-        # 3. RSI(4/14) 與變化量
+        # 3. RSI(14) 與變化量
         delta = df['Close'].diff()
-
-        def _calc_rsi(delta_series: pd.Series, period: int) -> pd.Series:
-            gain = delta_series.where(delta_series > 0, 0).rolling(period).mean()
-            loss = (-delta_series.where(delta_series < 0, 0)).rolling(period).mean()
-            rs = gain / loss.replace(0, np.nan)
-            rsi = 100 - (100 / (1 + rs))
-            return rsi.fillna(50).clip(0, 100)
-
-        # RSI4 用於市場溫度，RSI14 保留給原有診斷與舊模式判斷。
-        df['RSI4'] = _calc_rsi(delta, 4)
-        df['RSI14'] = _calc_rsi(delta, 14)
+        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        rs = gain / loss
+        df['RSI14'] = 100 - (100 / (1 + rs))
         df['RSI_Diff_1D'] = df['RSI14'].diff(1)
         df['RSI_Diff_2D'] = df['RSI14'].diff(2)
         df['RSI_Diff_5D'] = df['RSI14'].diff(5)
 
-        # 4. MACD & PPO 計算
+        # 4. MACD 計算
         ema12 = df['Close'].ewm(span=12, adjust=False).mean()
         ema26 = df['Close'].ewm(span=26, adjust=False).mean()
         df['DIF'] = ema12 - ema26
         df['DEA'] = df['DIF'].ewm(span=9, adjust=False).mean()
         df['MACD_Hist'] = (df['DIF'] - df['DEA']) * 2
-
-        # PPO (Percentage Price Oscillator)
-        df['PPO'] = ((ema12 - ema26) / ema26) * 100.0
-        df['PPO_Signal'] = df['PPO'].ewm(span=9, adjust=False).mean()
-        df['PPO_Hist'] = (df['PPO'] - df['PPO_Signal']) * 2.0
-
-        # 4.5 ATR(14): 用於判斷創高後是否短線過熱乖離。
-        prev_close = df['Close'].shift(1)
-        true_range = pd.concat([
-            df['High'] - df['Low'],
-            (df['High'] - prev_close).abs(),
-            (df['Low'] - prev_close).abs()
-        ], axis=1).max(axis=1)
-        df['ATR14'] = true_range.rolling(14).mean()
 
         # 5. 市場溫度 T 計算
         df['Ret20'] = df['Close'].pct_change(20)
@@ -344,7 +320,7 @@ class TechnicalAnalysisEngine:
         ma_score += np.where(df['MA20'] > df['MA60'], 25, 0)
         df['Score_MA'] = ma_score
 
-        df['Score_RSI'] = df['RSI4'].clip(0, 100)
+        df['Score_RSI'] = df['RSI14'].clip(0, 100)
         df['Score_MACD'] = df['MACD_Hist'].rolling(60).apply(
             lambda x: (pd.Series(x).rank(pct=True).iloc[-1] * 100) if len(x) > 0 else 50, raw=False
         )
@@ -357,23 +333,7 @@ class TechnicalAnalysisEngine:
             0.14 * df['Score_MACD'].fillna(50)
         ).clip(0, 100)
         
-        df['Temperature_MA3'] = df['Temperature'].rolling(3).mean()
-        df['Temperature_MA8'] = df['Temperature'].rolling(8).mean()
         df['Temperature_MA10'] = df['Temperature'].rolling(10).mean()
-        df['Temperature_Diff'] = df['Temperature_MA3'] - df['Temperature_MA8']
-        df['Temp_Near_Death_Cross'] = (
-            (df['Temperature_Diff'] > 0) &
-            (df['Temperature_Diff'] <= 5.0) &
-            (df['Temperature_Diff'] < df['Temperature_Diff'].shift(1))
-        )
-        df['Temp_Death_Cross'] = (
-            (df['Temperature_MA3'] < df['Temperature_MA8']) &
-            (df['Temperature_MA3'].shift(1) >= df['Temperature_MA8'].shift(1))
-        )
-        df['Temp_Golden_Cross'] = (
-            (df['Temperature_MA3'] > df['Temperature_MA8']) &
-            (df['Temperature_MA3'].shift(1) <= df['Temperature_MA8'].shift(1))
-        )
 
         # 多空格局與詳細原因判定
         ma5_diff = df['MA5'].diff()
@@ -451,13 +411,7 @@ class TechnicalAnalysisEngine:
         mode_b_pending = False
         mode_b_pending_low = 0.0
         
-        # 新高持倉策略狀態：創高當日只判斷突破品質；溫度死叉延後作最後守門員。
-        nh_active = False
-        nh_breakout_index = -999
-        nh_breakout_low = 0.0
-        nh_breakout_high = 0.0
-        nh_ma5_break_index = -999
-        nh_overheat_taken = False
+        mode_c_reduce_cooldown_until = -999
 
         for i in range(len(df)):
             current_date = df.index[i]
@@ -466,12 +420,6 @@ class TechnicalAnalysisEngine:
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
-                nh_active = False
-                nh_breakout_index = -999
-                nh_breakout_low = 0.0
-                nh_breakout_high = 0.0
-                nh_ma5_break_index = -999
-                nh_overheat_taken = False
                 action_list.append("區間前(不交易)")
                 reason_list.append("尚未進入設定的回測觀察時間區間")
                 pos_ratio_list.append(0.0)
@@ -487,7 +435,6 @@ class TechnicalAnalysisEngine:
             open_p = df['Open'].iloc[i]
             high_p = df['High'].iloc[i]
             low_p = df['Low'].iloc[i]
-            volume = df['Volume'].iloc[i]
 
             m5 = df['MA5'].iloc[i]
             m10 = df['MA10'].iloc[i]
@@ -514,29 +461,7 @@ class TechnicalAnalysisEngine:
 
             temp_val = df['Temperature'].iloc[i]
             prev_temp_val = df['Temperature'].iloc[i-1]
-            temp_ma3 = df['Temperature_MA3'].iloc[i]
-            temp_ma8 = df['Temperature_MA8'].iloc[i]
             temp_ma10 = df['Temperature_MA10'].iloc[i]
-            temp_diff = df['Temperature_Diff'].iloc[i]
-            temp_near_death_cross = bool(df['Temp_Near_Death_Cross'].iloc[i])
-            temp_death_cross = bool(df['Temp_Death_Cross'].iloc[i])
-            temp_golden_cross = bool(df['Temp_Golden_Cross'].iloc[i])
-
-            vol_ma20 = df['Vol_MA20'].iloc[i]
-            volume_ratio20 = df['Daily_Vol_Ratio20'].iloc[i]
-            if pd.isna(volume_ratio20) or np.isinf(volume_ratio20):
-                volume_ratio20 = 0.0
-            atr14 = df['ATR14'].iloc[i]
-            if pd.isna(atr14) or atr14 <= 0:
-                atr14 = max(high_p - low_p, close_p * 0.01)
-
-            day_range = max(high_p - low_p, 1e-9)
-            upper_shadow = high_p - max(open_p, close_p)
-            close_position = (close_p - low_p) / day_range
-            long_upper_shadow = (upper_shadow / day_range >= 0.40) and (close_position < 0.65)
-            close_near_high = close_position >= 0.65
-            explosive_volume = volume_ratio20 >= 2.0
-            breakout_volume_ok = volume_ratio20 >= 1.20
 
             # ----------------------------------------------------
             # 濾網條件計算
@@ -572,27 +497,12 @@ class TechnicalAnalysisEngine:
             )
             mode_b_buy_signal = cond_b_env and cond_b_rsi and cond_b_price
 
-            # 模式 NH: 新高突破持倉策略
-            close_20d_prev_high = df['Close'].iloc[max(0, i-20):i].max() if i >= 20 else df['Close'].iloc[:i].max()
-            close_60d_prev_high = df['Close'].iloc[max(0, i-60):i].max() if i >= 60 else close_20d_prev_high
-            is_20d_new_high = close_p > close_20d_prev_high
-            is_60d_new_high = close_p > close_60d_prev_high
-            is_new_high_close = is_20d_new_high or is_60d_new_high
-            breaks_boll_upper = close_p > bb_u
-            ma_bull_align = (close_p > m5) and (m5 > m10) and (m10 > m20) and (close_p > m20)
-            ppo_momentum_ok = (df['PPO'].iloc[i] >= df['PPO_Signal'].iloc[i]) or (hist >= prev_hist)
-
-            strong_new_high_breakout = (
-                is_new_high_close and breaks_boll_upper and breakout_volume_ok and
-                ma_bull_align and close_near_high and ppo_momentum_ok and not long_upper_shadow
-            )
-            ordinary_new_high_breakout = (
-                is_new_high_close and ma_bull_align and close_p > m5 and not long_upper_shadow
-            )
-            suspect_new_high_breakout = (
-                is_new_high_close and (long_upper_shadow or (explosive_volume and not close_near_high) or not ma_bull_align)
-            )
-            mode_nh_buy_signal = is_new_high_close
+            # 模式 C: 平台突破
+            close_15d_max = df['Close'].iloc[max(0, i-14):i].max() if i >= 15 else df['Close'].iloc[:i].max()
+            cond_c_ma_align = (close_p > m20) and (m20 > m60) and cond_ma20_up_5d
+            cond_c_new_high = close_p > close_15d_max
+            cond_c_long_red = (close_p > open_p) and (close_p >= bb_u * 0.995)
+            mode_c_buy_signal = cond_c_ma_align and cond_c_new_high and cond_c_long_red
 
             # ----------------------------------------------------
             # 出場與清倉機制條件
@@ -630,81 +540,17 @@ class TechnicalAnalysisEngine:
             is_near_20d_high = close_p >= (close_20d_max * 0.98)
             mode_b_exit_near_high = (entry_mode == "B") and is_near_20d_high and (prev_temp_val > 80.0) and macd_dc_and_below_ma20
 
-            # 清倉 4: 模式 B / NH 三日認錯停損
-            mode_bc_3d_failed = in_position and (entry_mode in ["B", "NH"]) and (1 <= days_since_entry <= 3) and (close_p < entry_low)
+            # 清倉 4: 模式 C 動能衰竭清倉
+            mode_c_macd_exhaust_exit = (entry_mode == "C") and (dif > 0) and (hist < 10.0) and ((prev_hist - hist) >= 10.0)
+
+            # 清倉 5: 模式 B/C 三日認錯停損
+            mode_bc_3d_failed = in_position and (entry_mode in ["B", "C"]) and (1 <= days_since_entry <= 3) and (close_p < entry_low)
 
             # ----------------------------------------------------
-            # 新高持倉策略：創高後由價格先止盈，溫度死叉作最後守門員。
+            # 減倉機制條件 (模式 C 專屬)
             # ----------------------------------------------------
-            if in_position and is_new_high_close and (close_p > m5):
-                nh_active = True
-                nh_breakout_index = i
-                nh_breakout_low = low_p
-                nh_breakout_high = high_p
-                nh_ma5_break_index = -999
-                nh_overheat_taken = False
-
-            nh_days_since_breakout = i - nh_breakout_index if nh_active else 999
-            nh_broke_ma5 = nh_active and (close_p < m5)
-            if nh_broke_ma5:
-                if nh_ma5_break_index < 0:
-                    nh_ma5_break_index = i
-            else:
-                nh_ma5_break_index = -999
-
-            nh_overheat_score = 0
-            nh_overheat_score += int(nh_active and breaks_boll_upper and temp_val >= 80.0)
-            nh_overheat_score += int(nh_active and (close_p - m5) >= 1.5 * atr14)
-            nh_overheat_score += int(nh_active and df['RSI4'].iloc[i] >= 85.0)
-            nh_overheat_score += int(nh_active and explosive_volume and long_upper_shadow)
-            nh_overheat_take_profit = nh_active and (not nh_overheat_taken) and (nh_overheat_score >= 2) and (position_ratio > 0.6)
-
-            nh_broke_ma10 = nh_active and (close_p < m10)
-            nh_back_to_boll_mid_with_volume = nh_active and (close_p < m20) and (volume_ratio20 >= 1.20)
-            
-            # ==========================================
-            # 💡 強勢主升浪判定 (MA10 完全遠離 MA20)
-            # ==========================================
-            ma10_ma20_gap = m10 - m20
-            is_strong_main_wave = (m10 > m20) and (m20 > m60) and (ma10_ma20_gap > atr14)
-
-            nh_ma5_first_take_profit = nh_active and nh_broke_ma5 and (i == nh_ma5_break_index) and (position_ratio > 0.5) and not is_strong_main_wave
-            nh_ma5_not_recovered = nh_active and (nh_ma5_break_index >= 0) and ((i - nh_ma5_break_index) >= 1) and (close_p < m5) and not is_strong_main_wave
-            
-            # 定義新的狀態，供後續介面顯示使用
-            nh_ma5_break_exempted = nh_active and nh_broke_ma5 and is_strong_main_wave
-
-            nh_temp_guard_reduce = nh_active and temp_death_cross and nh_broke_ma5 and (position_ratio > 0.3)
-            
-            # ==========================================
-            # 💡 新增：A 模式建倉 30 日內專屬主升浪結束濾網
-            # ==========================================
-            base_nh_temp_final_exit = nh_active and temp_death_cross and (nh_broke_ma10 or nh_back_to_boll_mid_with_volume)
-            
-            mode_a_final_exit_met = True
-            max_yang_low_val = 0.0
-            if in_position and (entry_mode == "A") and (days_since_entry <= 30):
-                start_idx = max(0, entry_index)
-                if i > start_idx:
-                    opens_arr = df['Open'].values[start_idx:i]
-                    closes_arr = df['Close'].values[start_idx:i]
-                    lows_arr = df['Low'].values[start_idx:i]
-                    
-                    bodies = closes_arr - opens_arr
-                    yang_idx = np.where(bodies > 0)[0]
-                    
-                    if len(yang_idx) > 0:
-                        longest_yang_idx = yang_idx[np.argmax(bodies[yang_idx])]
-                        max_yang_low_val = lows_arr[longest_yang_idx]
-                        is_yin_candle = close_p < open_p
-                        
-                        if not (is_yin_candle and low_p < max_yang_low_val):
-                            mode_a_final_exit_met = False
-            
-            nh_temp_final_exit = base_nh_temp_final_exit and mode_a_final_exit_met
-            nh_temp_final_exit_exempted = base_nh_temp_final_exit and not mode_a_final_exit_met
-            
-            nh_temp_near_guard = nh_active and temp_near_death_cross and (position_ratio > 0)
+            temp_drop_3d = (df['Temperature'].iloc[max(0, i-2)] - temp_val) if i >= 2 else 0.0
+            mode_c_reduce_trigger = (entry_mode == "C") and (position_ratio == 1.0) and (temp_drop_3d > 20.0)
 
             # ----------------------------------------------------
             # 邏輯判定順序
@@ -724,53 +570,6 @@ class TechnicalAnalysisEngine:
                 entry_mode = ""
                 mode_b_pending = False
                 mode_a_ma20_fail_flag = False
-                nh_active = False
-                nh_ma5_break_index = -999
-                nh_overheat_taken = False
-
-            elif nh_temp_final_exit and in_position:
-                act = "🛑 新高守門員清倉(溫度死叉+價格破位)"
-                rsn = f"創高後第{nh_days_since_breakout}天出現溫度死叉(MA3={temp_ma3:.1f}, MA8={temp_ma8:.1f})，且跌破MA10/放量跌回布林中軌之一成立，判定主升浪結束"
-                in_position = False
-                position_ratio = 0.0
-                entry_mode = ""
-                mode_b_pending = False
-                nh_active = False
-                nh_ma5_break_index = -999
-                nh_overheat_taken = False
-                
-            elif nh_temp_final_exit_exempted and in_position:
-                act = "🛡️ 模式A守門員豁免(未破大陽低點)"
-                rsn = f"出現溫度死叉與價格破位，但因模式A建倉30日內，當日陰線最低點(${low_p:.2f})未低於前方最長大陽線低點(${max_yang_low_val:.2f})，豁免主升浪結束清倉"
-
-            elif nh_temp_guard_reduce and in_position:
-                act = "🧯 新高守門員降倉(溫度死叉+跌破MA5)"
-                rsn = f"創高後第{nh_days_since_breakout}天正式溫度死叉，且收盤跌破MA5(${m5:.2f})；溫度死叉作最後守門員，先降至3至5層"
-                position_ratio = min(position_ratio, 0.4)
-
-            elif nh_ma5_not_recovered and in_position and (position_ratio > 0.5):
-                act = "⚠️ 新高後MA5失守未收回(降至半倉)"
-                rsn = f"創高後跌破MA5(${m5:.2f})且1至2日內未能收回，先降至半倉以下；尚未溫度死叉，不直接清倉"
-                position_ratio = min(position_ratio, 0.5)
-
-            elif nh_ma5_first_take_profit and in_position:
-                act = "⚠️ 新高後跌破MA5(第一段止盈)"
-                rsn = f"創高後先看價格，今日收盤跌破MA5(${m5:.2f})，先止盈2至3層；是否清倉交給後續溫度死叉與MA10守門"
-                position_ratio = max(0.0, position_ratio - 0.3)
-
-            elif nh_ma5_break_exempted and in_position:
-                act = "🛡️ 主升浪豁免(破MA5不減倉)"
-                rsn = f"收盤跌破MA5(${m5:.2f})，但判定 MA10(${m10:.2f}) 與 MA20(${m20:.2f}) 間距極寬(>1倍ATR)處於強勢主升浪，啟動洗盤豁免，維持當前持倉"
-
-            elif nh_overheat_take_profit and in_position:
-                act = "💰 新高過熱止盈2層"
-                rsn = f"突破後過熱條件達{nh_overheat_score}項(布林/乖離/RSI4/爆量上影)，先鎖利2層；未破MA5前不看空"
-                position_ratio = max(0.6, position_ratio - 0.2)
-                nh_overheat_taken = True
-
-            elif nh_temp_near_guard and in_position:
-                act = "👀 溫度接近死叉(只警戒不賣)"
-                rsn = f"短溫線仍在長溫線上方但差值縮小至{temp_diff:.1f}，符合接近死叉；創高當日/創高後初期不因接近死叉清倉，只禁止加倉並提高警戒"
 
             elif mode_a_ma20_fail_exit and in_position:
                 act = "🛑 模式A觸碰MA20受阻跌破MA5清倉"
@@ -778,9 +577,6 @@ class TechnicalAnalysisEngine:
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
-                nh_active = False
-                nh_ma5_break_index = -999
-                nh_overheat_taken = False
                 mode_a_ma20_fail_flag = False
                 
                 mode_a_search_new_low = True
@@ -793,9 +589,6 @@ class TechnicalAnalysisEngine:
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
-                nh_active = False
-                nh_ma5_break_index = -999
-                nh_overheat_taken = False
                 mode_a_ma20_fail_flag = False
 
             elif mode_a_weak_death_exit and in_position:
@@ -804,9 +597,6 @@ class TechnicalAnalysisEngine:
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
-                nh_active = False
-                nh_ma5_break_index = -999
-                nh_overheat_taken = False
                 mode_a_ma20_fail_flag = False
 
             elif mode_b_exit_near_high and in_position:
@@ -815,9 +605,13 @@ class TechnicalAnalysisEngine:
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
-                nh_active = False
-                nh_ma5_break_index = -999
-                nh_overheat_taken = False
+
+            elif mode_c_macd_exhaust_exit and in_position:
+                act = "🛑 模式C動能衰竭清倉"
+                rsn = f"模式C持倉中MACD水上柱狀體({hist:.2f})<10且較前日驟降({prev_hist - hist:.2f}>=10)，動能失血清倉"
+                in_position = False
+                position_ratio = 0.0
+                entry_mode = ""
 
             elif mode_bc_3d_failed and in_position:
                 act = f"🛑 模式{entry_mode} 3日認錯停損"
@@ -825,11 +619,15 @@ class TechnicalAnalysisEngine:
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
-                nh_active = False
-                nh_ma5_break_index = -999
-                nh_overheat_taken = False
 
-            # 2. 處理模式 B 之 T+1 延遲建倉
+            # 2. 模式 C 專屬減倉機制
+            elif mode_c_reduce_trigger:
+                act = "⚠️ 模式C減倉50%"
+                rsn = f"模式C滿倉3日內市場溫度急速驟降{temp_drop_3d:.1f}度(>20度)，隔日馬上減至半倉，並鎖定3日禁止加倉"
+                position_ratio = 0.5
+                mode_c_reduce_cooldown_until = i + 3
+
+            # 3. 處理模式 B 之 T+1 延遲建倉
             elif mode_b_pending:
                 if cond_bear_or_underwater:
                     act = "🚫 模式B建倉取消(市場環境轉壞)"
@@ -855,12 +653,16 @@ class TechnicalAnalysisEngine:
                     entry_mode = "B"
                     mode_b_pending = False
 
-            # 4. A/B 舊模式加倉機制；NH 新高策略不使用此條，避免與新版止盈規則衝突。
-            elif (entry_mode != "NH") and (position_ratio == 0.5) and (close_p > m20) and (bb_u_diff5 > 0):
-                act = "🚀 市場起立:準備起飛(加碼補滿倉)"
-                rsn = f"已有半倉，股價站上MA20(${m20:.2f})且布林上軌5日持續擴張，補滿至100%滿倉"
-                last_buy_index = i
-                position_ratio = 1.0
+            # 4. 加倉機制檢測
+            elif (position_ratio == 0.5) and (close_p > m20) and (bb_u_diff5 > 0):
+                if i < mode_c_reduce_cooldown_until:
+                    act = "🚫 暫停加倉(減倉冷卻期中)"
+                    rsn = f"觸發模式C減倉機制，3日內禁止加倉(冷卻中)"
+                else:
+                    act = "🚀 市場起立:準備起飛(加碼補滿倉)"
+                    rsn = f"已有半倉，股價站上MA20(${m20:.2f})且布林上軌5日持續擴張，補滿至100%滿倉"
+                    last_buy_index = i
+                    position_ratio = 1.0
 
             # 5. 模式 A 觸發「尋找新低點」重新建倉
             elif not in_position and mode_a_search_new_low:
@@ -918,19 +720,16 @@ class TechnicalAnalysisEngine:
                         mode_b_pending = True
                         mode_b_pending_low = low_p
 
-                elif mode_nh_buy_signal:
+                elif mode_c_buy_signal:
                     if cond_bear_or_underwater:
-                        act = "🚫 新高突破被禁用(熊市/MACD水下)"
-                        rsn = "季線向下且股價在季線下，或MACD雙線在水下，禁止追新高"
+                        act = "🚫 模式C被禁用(熊市/MACD水下)"
+                        rsn = "季線向下且股價在季線下，或MACD雙線在水下，全面禁止模式C追高突破"
                     elif cond_weak_hook:
-                        act = "⚠️ 新高突破被否決(弱勢勾頭)"
-                        rsn = "市場溫度10日線下滑且溫度<50度，動能弱化，拒絕新高追倉"
-                    elif suspect_new_high_breakout and not (strong_new_high_breakout or ordinary_new_high_breakout):
-                        act = "⚠️ 新高突破不追(疑似假突破)"
-                        rsn = "創新高但出現長上影、爆量滯漲或均線結構不強；依新版策略不追，等回踩確認"
-                    elif strong_new_high_breakout:
-                        act = "🟢 模式NH:強新高突破(持有8至10層)"
-                        rsn = f"收盤創新高且突破布林上軌，量比20日={volume_ratio20:.2f}，收近高點且MA5>MA10>MA20；創高當天不看溫度死叉，直接按強突破持有"
+                        act = "⚠️ 模式C被否決(弱勢勾頭)"
+                        rsn = "市場溫度10日線下滑且溫度<50度，拒絕開倉"
+                    else:
+                        act = "🟢 模式C:平台突破(建半倉)"
+                        rsn = f"【模式C平台突破】多頭排列下創15日新高、MA20 5日趨勢向上且收盤達布林上軌0.995倍，開倉50%半倉"
                         last_buy_index = i
                         entry_index = i
                         entry_price = close_p
@@ -938,44 +737,16 @@ class TechnicalAnalysisEngine:
                         entry_temp = temp_val
                         entry_rsi = rsi
                         in_position = True
-                        position_ratio = 1.0
-                        entry_mode = "NH"
-                        nh_active = True
-                        nh_breakout_index = i
-                        nh_breakout_low = low_p
-                        nh_breakout_high = high_p
-                        nh_ma5_break_index = -999
-                        nh_overheat_taken = False
-                    elif ordinary_new_high_breakout:
-                        act = "🟢 模式NH:普通新高突破(持有6至8層)"
-                        rsn = "收盤創新高且均線多頭排列，但未達強突破量價標準；以6至8層持有，用MA5作第一止盈線"
-                        last_buy_index = i
-                        entry_index = i
-                        entry_price = close_p
-                        entry_low = low_p
-                        entry_temp = temp_val
-                        entry_rsi = rsi
-                        in_position = True
-                        position_ratio = 0.7
-                        entry_mode = "NH"
-                        nh_active = True
-                        nh_breakout_index = i
-                        nh_breakout_low = low_p
-                        nh_breakout_high = high_p
-                        nh_ma5_break_index = -999
-                        nh_overheat_taken = False
+                        position_ratio = 0.5
+                        entry_mode = "C"
 
             elif in_position:
                 if entry_mode == "A" and 1 <= days_since_entry <= 7 and mode_a_ma20_fail_flag and (close_p < m5) and (m10 <= m5):
                     act = f"✊ 模式A續抱中(MA10<=MA5免清倉)"
                     rsn = f"模式A建倉7天內衝擊MA20受阻且今日跌破MA5，但因MA10({m10:.2f})<=MA5({m5:.2f})，不觸發清倉繼續持有"
                 else:
-                    if entry_mode == "NH":
-                        act = "✊ 模式NH新高持倉中"
-                        rsn = f"當前持倉{int(position_ratio*100)}%，創高後優先看MA5；溫度死叉僅作最後守門員，未觸發價格破位前續抱"
-                    else:
-                        act = f"✊ 模式{entry_mode}續抱中"
-                        rsn = f"當前持倉{int(position_ratio*100)}%，未觸發清倉或減倉條件，行情運作正常"
+                    act = f"✊ 模式{entry_mode}續抱中"
+                    rsn = f"當前持倉{int(position_ratio*100)}%，未觸發清倉或減倉條件，行情運作正常"
 
             action_list.append(act)
             reason_list.append(rsn)
@@ -988,7 +759,7 @@ class TechnicalAnalysisEngine:
         return df
 
     # ----------------------------------------------------
-    # 空倉者當日建倉適性診斷
+    # 💡 新增：空倉者當日建倉適性診斷（獨立評估）
     # ----------------------------------------------------
     @staticmethod
     def diagnose_flat_position_entry(df: pd.DataFrame) -> tuple[str, str]:
@@ -1001,7 +772,6 @@ class TechnicalAnalysisEngine:
         low_p = df['Low'].iloc[i]
 
         m5 = df['MA5'].iloc[i]
-        m10 = df['MA10'].iloc[i]
         m20 = df['MA20'].iloc[i]
         m60 = df['MA60'].iloc[i]
         m20_diff5 = df['MA20_Diff_5D'].iloc[i]
@@ -1015,16 +785,8 @@ class TechnicalAnalysisEngine:
         dea = df['DEA'].iloc[i]
         temp_val = df['Temperature'].iloc[i]
         temp_ma10 = df['Temperature_MA10'].iloc[i]
-        volume_ratio20 = df['Daily_Vol_Ratio20'].iloc[i]
-        if pd.isna(volume_ratio20) or np.isinf(volume_ratio20):
-            volume_ratio20 = 0.0
 
-        day_range = max(df['High'].iloc[i] - df['Low'].iloc[i], 1e-9)
-        upper_shadow = df['High'].iloc[i] - max(open_p, close_p)
-        close_position = (close_p - df['Low'].iloc[i]) / day_range
-        long_upper_shadow = (upper_shadow / day_range >= 0.40) and (close_position < 0.65)
-        close_near_high = close_position >= 0.65
-
+        # 否決條件
         is_ma60_down = m60 < df['MA60'].iloc[i-1]
         is_bear_market = is_ma60_down and (close_p < m60)
         is_macd_underwater = (dif < 0) and (dea < 0)
@@ -1038,9 +800,11 @@ class TechnicalAnalysisEngine:
 
         cond_ma20_up_5d = m20_diff5 > 0
 
+        # 模式 A 檢查
         rsi_recent_oversold = (df['RSI14'].iloc[max(0, i-4):i+1] < 30.0).any()
         mode_a_signal = rsi_recent_oversold and (rsi_diff_1 >= 8.0)
 
+        # 模式 B 檢查
         cond_b_env = ((m20 > m60) or (dif > 0)) and (close_p > m60) and (dif > 0)
         cond_b_rsi = (40.0 <= prev_rsi <= 50.0) and (rsi_diff_1 > 0)
         touched_ma20_recent = (df['Low'].iloc[max(0, i-1):i+1] <= df['MA20'].iloc[max(0, i-1):i+1] * 1.015).any()
@@ -1050,14 +814,14 @@ class TechnicalAnalysisEngine:
         )
         mode_b_signal = cond_b_env and cond_b_rsi and cond_b_price
 
-        close_20d_prev_high = df['Close'].iloc[max(0, i-20):i].max() if i >= 20 else df['Close'].iloc[:i].max()
-        close_60d_prev_high = df['Close'].iloc[max(0, i-60):i].max() if i >= 60 else close_20d_prev_high
-        is_new_high_close = (close_p > close_20d_prev_high) or (close_p > close_60d_prev_high)
-        ma_bull_align = (close_p > m5) and (m5 > m10) and (m10 > m20) and (close_p > m20)
-        strong_nh_signal = is_new_high_close and (close_p > bb_u) and (volume_ratio20 >= 1.20) and ma_bull_align and close_near_high and not long_upper_shadow
-        ordinary_nh_signal = is_new_high_close and ma_bull_align and not long_upper_shadow
-        suspect_nh_signal = is_new_high_close and (long_upper_shadow or not ma_bull_align)
+        # 模式 C 檢查
+        close_15d_max = df['Close'].iloc[max(0, i-14):i].max() if i >= 15 else df['Close'].iloc[:i].max()
+        cond_c_ma_align = (close_p > m20) and (m20 > m60) and cond_ma20_up_5d
+        cond_c_new_high = close_p > close_15d_max
+        cond_c_long_red = (close_p > open_p) and (close_p >= bb_u * 0.995)
+        mode_c_signal = cond_c_ma_align and cond_c_new_high and cond_c_long_red
 
+        # 診斷判定
         reasons = []
         
         if mode_a_signal:
@@ -1073,85 +837,18 @@ class TechnicalAnalysisEngine:
             else:
                 return "🟢 今日適合以【模式 B】預備建倉", "強勢回檔條件成立且MA20 5日趨勢向上，建議於下一交易日執行50%半倉建倉"
 
-        if is_new_high_close:
+        if mode_c_signal:
             if cond_bear_or_underwater:
                 reasons.append("季線向下且股價在季線下，或MACD雙線在水下")
             elif cond_weak_hook:
                 reasons.append("市場溫度10日線下滑且溫度<50度（弱勢勾頭）")
-            elif suspect_nh_signal and not (strong_nh_signal or ordinary_nh_signal):
-                reasons.append("創新高但長上影或均線結構不強，疑似假突破")
-            elif strong_nh_signal:
-                return "🟢 今日適合以【模式 NH】建倉", f"強新高突破成立：創20/60日新高、突破布林上軌、20日量比{volume_ratio20:.2f}且收近高點，可持有8至10層"
-            elif ordinary_nh_signal:
-                return "🟢 今日適合以【模式 NH】建倉", "普通新高突破成立：均線多頭排列且收盤創高，可持有6至8層，後續用MA5止盈、溫度死叉作最後守門員"
+            else:
+                return "🟢 今日適合以【模式 C】建倉", "多頭排列下創15日新高、MA20 5日趨勢向上且收盤達布林上軌0.995倍，符合平台突破條件（可建50%半倉）"
 
         if reasons:
             return "⚠️ 今日無適合建倉模式 (觸發否決)", f"雖然技術型態接近，但因【{'; '.join(reasons)}】被系統否決開倉"
 
-        return "🟡 今日無符合之建倉模式", "目前技術面未觸發模式A/B/NH之任何建倉訊號，空倉者請繼續保持觀望"
-
-    # ----------------------------------------------------
-    # 明日極短線定向分析 (看多/看空/觀望)
-    # ----------------------------------------------------
-    @staticmethod
-    def predict_next_day_direction(df: pd.DataFrame) -> tuple[str, str]:
-        if len(df) < 5:
-            return "觀望 🟡", "資料不足"
-
-        latest = df.iloc[-1]
-        prev_1 = df.iloc[-2]
-
-        close_p = latest['Close']
-        m5 = latest['MA5']
-        m10 = latest['MA10']
-        rsi = latest['RSI14']
-        rsi_diff1 = latest['RSI_Diff_1D']
-        hist = latest['MACD_Hist']
-        prev_hist = prev_1['MACD_Hist']
-        temp = latest['Temperature']
-        prev_temp = prev_1['Temperature']
-
-        bull_score = 0
-        bear_score = 0
-
-        if close_p > m5:
-            bull_score += 2
-        else:
-            bear_score += 2
-
-        if m5 > m10:
-            bull_score += 1
-        else:
-            bear_score += 1
-
-        hist_diff = hist - prev_hist
-        if hist_diff > 0:
-            bull_score += 2
-        else:
-            bear_score += 2
-
-        if rsi_diff1 > 0:
-            bull_score += 1
-        else:
-            bear_score += 1
-
-        if rsi >= 70.0:
-            bear_score += 1
-        elif rsi <= 30.0:
-            bull_score += 1
-
-        if temp > prev_temp:
-            bull_score += 1
-        else:
-            bear_score += 1
-
-        diff = bull_score - bear_score
-        if diff >= 3:
-            return "看多 🟢", "均線向上且短線動能增強"
-        elif diff <= -3:
-            return "看空 🔴", "短線轉弱或高檔動能背離"
-        else:
-            return "觀望 🟡", "多空訊號拉鋸，短線震盪"
+        return "🟡 今日無符合之建倉模式", "目前技術面未觸發模式A/B/C之任何建倉訊號，空倉者請繼續保持觀望"
 
     # ----------------------------------------------------
     # ⚡ 專屬雷達診斷引擎
@@ -1177,11 +874,7 @@ class TechnicalAnalysisEngine:
         hist = latest['MACD_Hist']
         prev_hist = prev_1['MACD_Hist']
         temp = latest['Temperature']
-        temp_ma3 = latest['Temperature_MA3']
-        temp_ma8 = latest['Temperature_MA8']
         temp_ma10 = latest['Temperature_MA10']
-        temp_death_cross = bool(latest['Temp_Death_Cross'])
-        temp_near_death_cross = bool(latest['Temp_Near_Death_Cross'])
 
         is_high_temp = temp >= 75.0
         is_rsi_overbought = rsi >= 70.0
@@ -1212,11 +905,7 @@ class TechnicalAnalysisEngine:
         if (high_p >= bb_u) and (close_p < latest['Open']):
             alerts.append("⚡ 衝高受阻(帶上影線)")
             
-        if temp_death_cross:
-            alerts.append("🧯 溫度死叉(創高後最後守門員)")
-        elif temp_near_death_cross:
-            alerts.append("👀 溫度接近死叉(提高警戒不單獨賣出)")
-        elif is_high_temp and (temp < temp_ma10):
+        if is_high_temp and (temp < temp_ma10):
             alerts.append("📉 市場溫度從高檔彎頭")
 
         if (hist > 0) and (hist < prev_hist):
@@ -1229,14 +918,10 @@ class TechnicalAnalysisEngine:
 
         if "MACD死叉+跌破20日線" in primary_alert:
             diag_detail = f"今日MACD轉死叉且跌破月線(${m20:.2f})，觸發策略100%清倉防禦條件。"
-        elif "溫度死叉" in primary_alert:
-            diag_detail = f"市場溫度短線已下穿長線(MA3={temp_ma3:.1f}, MA8={temp_ma8:.1f})；若同時跌破MA10，依新高策略作最後清倉守門。"
-        elif "接近死叉" in primary_alert:
-            diag_detail = f"市場溫度短長線差距收斂，屬創高後警戒訊號；未出現價格破位前不單獨賣出。"
         elif "高檔背離" in primary_alert or "從高檔彎頭" in primary_alert:
             diag_detail = f"市場溫度高達{temp:.1f}°C，股價遠離季線，慎防高檔背離拉回。"
         elif "順勢發動" in setup_status:
-            diag_detail = f"均線多頭排列，RSI({rsi:.1f})溫和，適合模式B或新版NH新高突破策略佈局。"
+            diag_detail = f"均線多頭排列，RSI({rsi:.1f})溫和，極度適合模式B與模式C佈局。"
         else:
             diag_detail = f"當前技術面指標呈平穩定向運作，可依據K線訊號追蹤觀望。"
 
@@ -1374,7 +1059,7 @@ if db.get("stocks"):
         st.sidebar.success(f"已刪除 {del_sym}")
         st.rerun()
 
-st.title("📈 模式 A/B/NH 布林+MACD+RSI 新高持倉趨勢分析系統")
+st.title("📈 模式 A/B/C 布林+MACD+RSI 多模式趨勢分析系統")
 
 tab1, tab2 = st.tabs(["🔍 單一標的 K 線與歷史回測", "⚡ 自選清單一鍵當日診斷雷達"])
 
@@ -1474,6 +1159,7 @@ with tab1:
                         st.markdown("---")
                         st.markdown("#### 💡 當前最新策略操作建議與動態提醒")
                         
+                        # 1. 呈現歷史回測延續的持倉建議
                         act_text = latest['Advice_Action']
                         rsn_text = latest['Advice_Reason']
                         
@@ -1486,6 +1172,7 @@ with tab1:
                         else:
                             st.info(f"**【歷史持倉建議】{act_text}** — {rsn_text}")
 
+                        # 2. 💡 新增：空倉者當日獨立建倉適性提示
                         flat_title, flat_desc = TechnicalAnalysisEngine.diagnose_flat_position_entry(df_calc)
                         if "🟢" in flat_title:
                             st.success(f"**【空倉者今日建議】{flat_title}** — {flat_desc}")
@@ -1497,7 +1184,7 @@ with tab1:
                         st.markdown("---")
                         st.markdown("#### 📊 最新市場指標總覽")
                         
-                        m1, m2, m3, m4, m5, m6, m7 = st.columns([1.1, 1.2, 1.1, 1.1, 1.0, 1.0, 1.1])
+                        m1, m2, m3, m4, m5, m6 = st.columns([1.2, 1.3, 1.2, 1.2, 1.1, 1.1])
                         
                         temp_val = latest['Temperature']
                         m1.metric("市場動態溫度 T", f"{temp_val:.1f}°C")
@@ -1534,9 +1221,6 @@ with tab1:
                         b20_tag = "看多 🟢" if latest['Bull_20D'] else ("看空 🔴" if latest['Bear_20D'] else "震盪 🟡")
                         m6.metric("20日中期格局", b20_tag)
 
-                        next_dir_tag, next_dir_desc = TechnicalAnalysisEngine.predict_next_day_direction(df_calc)
-                        m7.metric("明日極短線定向", next_dir_tag, next_dir_desc)
-
                         st.markdown("---")
                         st.markdown("#### 🔍 多空格局技術面原因解析")
                         c_rs1, c_rs2 = st.columns(2)
@@ -1546,19 +1230,18 @@ with tab1:
                             st.info(f"**📌 20日中期格局原因：** {latest['Reason_20D']}")
 
                         st.markdown("---")
-                        st.markdown("#### 🎯 K線、市場溫度、RSI、MACD、PPO 與 新高持倉策略績效淨值曲線 六圖對照")
+                        st.markdown("#### 🎯 K線、市場溫度、RSI、MACD 與 策略績效淨值曲線 五圖對照")
 
                         fig = make_subplots(
-                            rows=6, cols=1, 
+                            rows=5, cols=1, 
                             shared_xaxes=True, 
-                            vertical_spacing=0.02, 
-                            row_heights=[0.3, 0.12, 0.12, 0.12, 0.14, 0.2],
+                            vertical_spacing=0.025, 
+                            row_heights=[0.35, 0.15, 0.15, 0.15, 0.2],
                             subplot_titles=(
                                 f"{bt_symbol} K線、MA5/10/20/60 均線與布林通道", 
                                 "動態市場溫度 T (0-100)", 
                                 "RSI(14) 指標", 
                                 "MACD 指標 (DIF, DEA, 柱狀圖)",
-                                "PPO 指標 (Percentage Price Oscillator)",
                                 "累積收益率淨值曲線對比 (初始基準 = 1.0)"
                             )
                         )
@@ -1600,23 +1283,16 @@ with tab1:
                         fig.add_trace(go.Bar(x=df_sub.index, y=df_sub['MACD_Hist'], name='MACD 柱狀圖', marker_color=macd_colors), row=4, col=1)
                         fig.add_hline(y=0, line_dash="solid", line_color="#9E9E9E", row=4, col=1)
 
-                        # Row 5: PPO 圖表 (新增)
-                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['PPO'], mode='lines', name='PPO 快線 (%)', line=dict(color='#8E24AA', width=1.2)), row=5, col=1)
-                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['PPO_Signal'], mode='lines', name='PPO 訊號線', line=dict(color='#F57C00', width=1.2)), row=5, col=1)
-                        ppo_colors = ['#26a69a' if ph >= 0 else '#ef5350' for ph in df_sub['PPO_Hist']]
-                        fig.add_trace(go.Bar(x=df_sub.index, y=df_sub['PPO_Hist'], name='PPO 柱狀圖', marker_color=ppo_colors), row=5, col=1)
-                        fig.add_hline(y=0, line_dash="solid", line_color="#9E9E9E", row=5, col=1)
-
-                        # Row 6: 淨值曲線
-                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Strategy_Equity'], mode='lines', name='策略動態淨值', line=dict(color='#2E7D32', width=2)), row=6, col=1)
-                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['BH_Equity'], mode='lines', name='買入持有淨值', line=dict(color='#757575', width=1.5, dash='dot')), row=6, col=1)
-                        fig.add_hline(y=1.0, line_dash="solid", line_color="#E0E0E0", row=6, col=1)
+                        # Row 5: 淨值曲線
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Strategy_Equity'], mode='lines', name='策略動態淨值', line=dict(color='#2E7D32', width=2)), row=5, col=1)
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['BH_Equity'], mode='lines', name='買入持有淨值', line=dict(color='#757575', width=1.5, dash='dot')), row=5, col=1)
+                        fig.add_hline(y=1.0, line_dash="solid", line_color="#E0E0E0", row=5, col=1)
 
                         fig.update_layout(
                             xaxis_rangeslider_visible=False,
                             hovermode="x unified",
                             template="plotly_white",
-                            height=1150
+                            height=1000
                         )
                         st.plotly_chart(fig, use_container_width=True)
 
@@ -1626,10 +1302,10 @@ with tab1:
                         show_df = df_sub.copy()
                         show_df['市場溫度 T'] = show_df['Temperature'].round(1)
                         show_df['RSI(14)'] = show_df['RSI14'].round(2)
-                        show_df['PPO柱狀'] = show_df['PPO_Hist'].round(3)  # 將 MACD柱狀 替換為 PPO柱狀
+                        show_df['MACD柱狀'] = show_df['MACD_Hist'].round(3)
                         show_df['持倉比率'] = (show_df['Position_Ratio'] * 100).astype(int).astype(str) + "%"
                         
-                        show_cols = ["Open", "High", "Low", "Close", "Volume", "持倉比率", "市場溫度 T", "RSI(14)", "PPO柱狀", "Reason_5D", "Reason_20D", "Advice_Action", "Advice_Reason"]
+                        show_cols = ["Open", "High", "Low", "Close", "Volume", "持倉比率", "市場溫度 T", "RSI(14)", "MACD柱狀", "Reason_5D", "Reason_20D", "Advice_Action", "Advice_Reason"]
                         rename_dict = {
                             "Reason_5D": "5日格局原因",
                             "Reason_20D": "20日格局原因",
