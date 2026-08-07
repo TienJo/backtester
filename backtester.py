@@ -661,8 +661,19 @@ class TechnicalAnalysisEngine:
 
             nh_broke_ma10 = nh_active and (close_p < m10)
             nh_back_to_boll_mid_with_volume = nh_active and (close_p < m20) and (volume_ratio20 >= 1.20)
-            nh_ma5_first_take_profit = nh_active and nh_broke_ma5 and (i == nh_ma5_break_index) and (position_ratio > 0.5)
-            nh_ma5_not_recovered = nh_active and (nh_ma5_break_index >= 0) and ((i - nh_ma5_break_index) >= 1) and (close_p < m5)
+            
+            # ==========================================
+            # 💡 新增：強勢主升浪判定 (MA10 完全遠離 MA20)
+            # ==========================================
+            ma10_ma20_gap = m10 - m20
+            is_strong_main_wave = (m10 > m20) and (m20 > m60) and (ma10_ma20_gap > atr14)
+
+            nh_ma5_first_take_profit = nh_active and nh_broke_ma5 and (i == nh_ma5_break_index) and (position_ratio > 0.5) and not is_strong_main_wave
+            nh_ma5_not_recovered = nh_active and (nh_ma5_break_index >= 0) and ((i - nh_ma5_break_index) >= 1) and (close_p < m5) and not is_strong_main_wave
+            
+            # 定義新的狀態，供後續介面顯示使用
+            nh_ma5_break_exempted = nh_active and nh_broke_ma5 and is_strong_main_wave
+
             nh_temp_guard_reduce = nh_active and temp_death_cross and nh_broke_ma5 and (position_ratio > 0.3)
             nh_temp_final_exit = nh_active and temp_death_cross and (nh_broke_ma10 or nh_back_to_boll_mid_with_volume)
             nh_temp_near_guard = nh_active and temp_near_death_cross and (position_ratio > 0)
@@ -714,6 +725,13 @@ class TechnicalAnalysisEngine:
                 act = "⚠️ 新高後跌破MA5(第一段止盈)"
                 rsn = f"創高後先看價格，今日收盤跌破MA5(${m5:.2f})，先止盈2至3層；是否清倉交給後續溫度死叉與MA10守門"
                 position_ratio = max(0.0, position_ratio - 0.3)
+
+            # ==========================================
+            # 💡 新增：攔截跌破 MA5 的動作，改為豁免狀態
+            # ==========================================
+            elif nh_ma5_break_exempted and in_position:
+                act = "🛡️ 主升浪豁免(破MA5不減倉)"
+                rsn = f"收盤跌破MA5(${m5:.2f})，但判定 MA10(${m10:.2f}) 與 MA20(${m20:.2f}) 間距極寬(>1倍ATR)處於強勢主升浪，啟動洗盤豁免，維持當前持倉"
 
             elif nh_overheat_take_profit and in_position:
                 act = "💰 新高過熱止盈2層"
