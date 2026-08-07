@@ -296,7 +296,7 @@ class TechnicalAnalysisEngine:
         df['RSI_Diff_2D'] = df['RSI14'].diff(2)
         df['RSI_Diff_5D'] = df['RSI14'].diff(5)
 
-        # 4. PPO 計算 (取代原本的 MACD)
+        # 4. PPO 計算替換 MACD
         ema12 = df['Close'].ewm(span=12, adjust=False).mean()
         ema26 = df['Close'].ewm(span=26, adjust=False).mean()
         df['PPO'] = ((ema12 - ema26) / ema26) * 100.0
@@ -321,6 +321,8 @@ class TechnicalAnalysisEngine:
         df['Score_MA'] = ma_score
 
         df['Score_RSI'] = df['RSI14'].clip(0, 100)
+        
+        # 使用 PPO 百分位替換 MACD 百分位
         df['Score_PPO'] = df['PPO_Hist'].rolling(60).apply(
             lambda x: (pd.Series(x).rank(pct=True).iloc[-1] * 100) if len(x) > 0 else 50, raw=False
         )
@@ -411,11 +413,8 @@ class TechnicalAnalysisEngine:
         mode_b_pending = False
         mode_b_pending_low = 0.0
         
-        # 模式 C 滿倉驟降清倉機制相關變數
-        mode_c_full_pos_idx = -999
-        mode_c_full_pos_temp = 0.0
-        mode_c_drop_flag = False
-        mode_c_min_temp_3d = 100.0
+        mode_c_full_idx = -999
+        mode_c_danger_flag = False
 
         for i in range(len(df)):
             current_date = df.index[i]
@@ -460,24 +459,12 @@ class TechnicalAnalysisEngine:
             ppo_sig = df['PPO_Signal'].iloc[i]
             prev_ppo = df['PPO'].iloc[i-1]
             prev_ppo_sig = df['PPO_Signal'].iloc[i-1]
-            hist = df['PPO_Hist'].iloc[i]
-            prev_hist = df['PPO_Hist'].iloc[i-1]
+            ppo_hist = df['PPO_Hist'].iloc[i]
+            prev_ppo_hist = df['PPO_Hist'].iloc[i-1]
 
             temp_val = df['Temperature'].iloc[i]
             prev_temp_val = df['Temperature'].iloc[i-1]
             temp_ma10 = df['Temperature_MA10'].iloc[i]
-            
-            # 模式 C 滿倉 4 日內邏輯判定
-            mode_c_4th_day_exit = False
-            if in_position and entry_mode == "C" and position_ratio == 1.0:
-                days_full = i - mode_c_full_pos_idx
-                if 1 <= days_full <= 3:
-                    mode_c_min_temp_3d = min(mode_c_min_temp_3d, temp_val)
-                    if (mode_c_full_pos_temp - temp_val) > 20.0:
-                        mode_c_drop_flag = True
-                elif days_full == 4:
-                    if mode_c_drop_flag and (temp_val < mode_c_min_temp_3d):
-                        mode_c_4th_day_exit = True
 
             # ----------------------------------------------------
             # 濾網條件計算
@@ -524,7 +511,7 @@ class TechnicalAnalysisEngine:
             # 出場與清倉機制條件
             # ----------------------------------------------------
             ppo_dc = (ppo < ppo_sig) and (prev_ppo >= prev_ppo_sig)
-            ppo_dc_and_below_ma20 = ppo_dc and (close_p < m20)
+            ppo_dc_exit = ppo_dc and (close_p < m20) and (temp_val < temp_ma10)
 
             # 清倉 2: 模式 A 虛高放棄建倉
             mode_a_fake_high_exit = (entry_mode == "A") and (temp_val > 80.0) and (close_p < entry_price * 1.03)
@@ -554,13 +541,27 @@ class TechnicalAnalysisEngine:
             # 清倉 3: 模式 B 高位獲利清倉
             close_20d_max = df['Close'].iloc[max(0, i-19):i+1].max()
             is_near_20d_high = close_p >= (close_20d_max * 0.98)
-            mode_b_exit_near_high = (entry_mode == "B") and is_near_20d_high and (prev_temp_val > 80.0) and ppo_dc_and_below_ma20
+            mode_b_exit_near_high = (entry_mode == "B") and is_near_20d_high and (prev_temp_val > 80.0) and ppo_dc_exit
 
-            # 清倉 4: 模式 C 動能衰竭清倉
-            mode_c_ppo_exhaust_exit = (entry_mode == "C") and (ppo > 0) and (hist < 10.0) and ((prev_hist - hist) >= 10.0)
+            # 清倉 4: 模式 C 動能衰竭清倉 (PPO參數縮小級距)
+            mode_c_ppo_exhaust_exit = (entry_mode == "C") and (ppo > 0) and (ppo_hist < 0.5) and ((prev_ppo_hist - ppo_hist) >= 0.5)
 
             # 清倉 5: 模式 B/C 三日認錯停損
             mode_bc_3d_failed = in_position and (entry_mode in ["B", "C"]) and (1 <= days_since_entry <= 3) and (close_p < entry_low)
+
+            # ----------------------------------------------------
+            # 模式 C 滿倉驟降清倉條件
+            # ----------------------------------------------------
+            mode_c_temp_crash_exit = False
+            if in_position and (entry_mode == "C") and (position_ratio == 1.0):
+                days_since_full = i - mode_c_full_idx
+                if 1 <= days_since_full <= 3:
+                    temp_full = df['Temperature'].iloc[mode_c_full_idx]
+                    if (temp_full - temp_val) > 20.0:
+                        mode_c_danger_flag = True
+                elif days_since_full == 4 and mode_c_danger_flag:
+                    if temp_val < prev_temp_val:
+                        mode_c_temp_crash_exit = True
 
             # ----------------------------------------------------
             # 邏輯判定順序
@@ -572,21 +573,14 @@ class TechnicalAnalysisEngine:
                 mode_a_search_new_low = False
 
             # 1. 各項清倉機制優先檢測
-            if ppo_dc_and_below_ma20 and in_position:
-                act = "🛑 100%清倉(PPO死叉+跌破MA20)"
-                rsn = f"PPO出現死叉且收盤價(${close_p:.2f})跌破MA20(${m20:.2f})，趨勢轉空，無條件全數清倉"
+            if ppo_dc_exit and in_position:
+                act = "🛑 100%清倉(PPO死叉+跌破MA20+趨勢轉空)"
+                rsn = f"PPO出現死叉且收盤價(${close_p:.2f})跌破MA20(${m20:.2f})，T({temp_val:.1f})小於T10均，趨勢轉空，無條件全數清倉"
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
                 mode_b_pending = False
                 mode_a_ma20_fail_flag = False
-
-            elif mode_c_4th_day_exit and in_position:
-                act = "🛑 模式C驟降破底清倉"
-                rsn = f"模式C滿倉3日內溫度急降>20度，今日(第4日)溫度({temp_val:.1f})創下新低，動能耗竭直接清倉"
-                in_position = False
-                position_ratio = 0.0
-                entry_mode = ""
 
             elif mode_a_ma20_fail_exit and in_position:
                 act = "🛑 模式A觸碰MA20受阻跌破MA5清倉"
@@ -625,7 +619,7 @@ class TechnicalAnalysisEngine:
 
             elif mode_c_ppo_exhaust_exit and in_position:
                 act = "🛑 模式C動能衰竭清倉"
-                rsn = f"模式C持倉中PPO水上柱狀體({hist:.2f})<10且較前日驟降({prev_hist - hist:.2f}>=10)，動能失血清倉"
+                rsn = f"模式C持倉中PPO水上柱狀體({ppo_hist:.2f})<0.5且較前日驟降({prev_ppo_hist - ppo_hist:.2f}>=0.5)，動能失血清倉"
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
@@ -637,7 +631,16 @@ class TechnicalAnalysisEngine:
                 position_ratio = 0.0
                 entry_mode = ""
 
-            # 2. 處理模式 B 之 T+1 延遲建倉
+            # 2. 模式 C 專屬極端降溫清倉機制
+            elif mode_c_temp_crash_exit:
+                act = "🛑 模式C驟降清倉"
+                rsn = f"模式C滿倉3日內市場溫度急速驟降超過20度，今日溫度({temp_val:.1f})再創新低，趨勢破壞直接清倉"
+                in_position = False
+                position_ratio = 0.0
+                entry_mode = ""
+                mode_c_danger_flag = False
+
+            # 3. 處理模式 B 之 T+1 延遲建倉
             elif mode_b_pending:
                 if cond_bear_or_underwater:
                     act = "🚫 模式B建倉取消(市場環境轉壞)"
@@ -663,19 +666,17 @@ class TechnicalAnalysisEngine:
                     entry_mode = "B"
                     mode_b_pending = False
 
-            # 3. 加倉機制檢測
+            # 4. 加倉機制檢測
             elif (position_ratio == 0.5) and (close_p > m20) and (bb_u_diff5 > 0):
                 act = "🚀 市場起立:準備起飛(加碼補滿倉)"
                 rsn = f"已有半倉，股價站上MA20(${m20:.2f})且布林上軌5日持續擴張，補滿至100%滿倉"
                 last_buy_index = i
                 position_ratio = 1.0
                 if entry_mode == "C":
-                    mode_c_full_pos_idx = i
-                    mode_c_full_pos_temp = temp_val
-                    mode_c_drop_flag = False
-                    mode_c_min_temp_3d = temp_val
+                    mode_c_full_idx = i
+                    mode_c_danger_flag = False
 
-            # 4. 模式 A 觸發「尋找新低點」重新建倉
+            # 5. 模式 A 觸發「尋找新低點」重新建倉
             elif not in_position and mode_a_search_new_low:
                 days_searching = i - mode_a_search_start_idx
                 is_touch_bb_lower = low_p <= bb_l * 1.005
@@ -699,7 +700,7 @@ class TechnicalAnalysisEngine:
                     act = "🔍 模式A尋找新低點中"
                     rsn = f"離場後尋找新低點第{days_searching}/7天，等待股價觸及布林下軌(${bb_l:.2f})並跌破前低(${mode_a_last_exit_min_low:.2f})"
 
-            # 5. 新進場觸發檢測
+            # 6. 新進場觸發檢測
             elif not in_position and not cd_buy_active:
                 if mode_a_buy_signal:
                     act = "🟢 模式A:超賣強彈(建半倉)"
@@ -757,7 +758,7 @@ class TechnicalAnalysisEngine:
                     rsn = f"模式A建倉7天內衝擊MA20受阻且今日跌破MA5，但因MA10({m10:.2f})<=MA5({m5:.2f})，不觸發清倉繼續持有"
                 else:
                     act = f"✊ 模式{entry_mode}續抱中"
-                    rsn = f"當前持倉{int(position_ratio*100)}%，未觸發清倉條件，行情運作正常"
+                    rsn = f"當前持倉{int(position_ratio*100)}%，未觸發清倉或減倉條件，行情運作正常"
 
             action_list.append(act)
             reason_list.append(rsn)
@@ -770,7 +771,7 @@ class TechnicalAnalysisEngine:
         return df
 
     # ----------------------------------------------------
-    # 💡 新增：空倉者當日建倉適性診斷（獨立評估）
+    # 空倉者當日建倉適性診斷（獨立評估）
     # ----------------------------------------------------
     @staticmethod
     def diagnose_flat_position_entry(df: pd.DataFrame) -> tuple[str, str]:
@@ -862,7 +863,7 @@ class TechnicalAnalysisEngine:
         return "🟡 今日無符合之建倉模式", "目前技術面未觸發模式A/B/C之任何建倉訊號，空倉者請繼續保持觀望"
 
     # ----------------------------------------------------
-    # ⚡ 專屬雷達診斷引擎
+    # 專屬雷達診斷引擎
     # ----------------------------------------------------
     @staticmethod
     def analyze_daily_radar(df: pd.DataFrame) -> tuple[str, str, str]:
@@ -882,8 +883,8 @@ class TechnicalAnalysisEngine:
         rsi = latest['RSI14']
         ppo = latest['PPO']
         ppo_sig = latest['PPO_Signal']
-        hist = latest['PPO_Hist']
-        prev_hist = prev_1['PPO_Hist']
+        ppo_hist = latest['PPO_Hist']
+        prev_ppo_hist = prev_1['PPO_Hist']
         temp = latest['Temperature']
         temp_ma10 = latest['Temperature_MA10']
 
@@ -895,7 +896,7 @@ class TechnicalAnalysisEngine:
         
         if (close_p > m20) and (m20 > m60) and (45.0 <= rsi <= 62.0) and (ppo > ppo_sig) and not is_high_temp:
             setup_status = "🟢 極佳 (順勢發動)"
-        elif is_rsi_oversold and (hist > prev_hist):
+        elif is_rsi_oversold and (ppo_hist > prev_ppo_hist):
             setup_status = "🟢 良好 (超賣止跌)"
         elif is_high_temp or (rsi > 68.0):
             setup_status = "🔴 偏低 (過熱追高險)"
@@ -919,7 +920,7 @@ class TechnicalAnalysisEngine:
         if is_high_temp and (temp < temp_ma10):
             alerts.append("📉 市場溫度從高檔彎頭")
 
-        if (hist > 0) and (hist < prev_hist):
+        if (ppo_hist > 0) and (ppo_hist < prev_ppo_hist):
             alerts.append("⚠️ PPO紅柱縮短(動能減弱)")
 
         if bw < 0.07:
@@ -1183,7 +1184,7 @@ with tab1:
                         else:
                             st.info(f"**【歷史持倉建議】{act_text}** — {rsn_text}")
 
-                        # 2. 💡 新增：空倉者當日獨立建倉適性提示
+                        # 2. 空倉者當日獨立建倉適性提示
                         flat_title, flat_desc = TechnicalAnalysisEngine.diagnose_flat_position_entry(df_calc)
                         if "🟢" in flat_title:
                             st.success(f"**【空倉者今日建議】{flat_title}** — {flat_desc}")
@@ -1224,7 +1225,7 @@ with tab1:
 
                         ppo_val = latest['PPO']
                         ppo_tag = "0軸上方 (強勢)" if ppo_val > 0 else "0軸下方 (弱勢)"
-                        m4.metric("PPO 快線", f"{ppo_val:.2f}", ppo_tag)
+                        m4.metric("PPO 快線", f"{ppo_val:.2f}%", ppo_tag)
 
                         b5_tag = "看多 🟢" if latest['Bull_5D'] else ("看空 🔴" if latest['Bear_5D'] else "震盪 🟡")
                         m5.metric("5日短期格局", b5_tag)
@@ -1252,7 +1253,7 @@ with tab1:
                                 f"{bt_symbol} K線、MA5/10/20/60 均線與布林通道", 
                                 "動態市場溫度 T (0-100)", 
                                 "RSI(14) 指標", 
-                                "PPO 指標 (PPO, Signal, 柱狀圖)",
+                                "PPO 指標 (快線, 慢線, 柱狀圖)",
                                 "累積收益率淨值曲線對比 (初始基準 = 1.0)"
                             )
                         )
@@ -1288,7 +1289,7 @@ with tab1:
 
                         # Row 4: PPO
                         fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['PPO'], mode='lines', name='PPO (快線)', line=dict(color='#2962FF', width=1.2)), row=4, col=1)
-                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['PPO_Signal'], mode='lines', name='PPO Signal (慢線)', line=dict(color='#FF6D00', width=1.2)), row=4, col=1)
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['PPO_Signal'], mode='lines', name='PPO_Signal (慢線)', line=dict(color='#FF6D00', width=1.2)), row=4, col=1)
                         
                         ppo_colors = ['#26a69a' if h >= 0 else '#ef5350' for h in df_sub['PPO_Hist']]
                         fig.add_trace(go.Bar(x=df_sub.index, y=df_sub['PPO_Hist'], name='PPO 柱狀圖', marker_color=ppo_colors), row=4, col=1)
