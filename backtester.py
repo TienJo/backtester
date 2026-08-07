@@ -385,7 +385,7 @@ class TechnicalAnalysisEngine:
         df['Reason_20D'] = trend_reason_20d
 
         # ----------------------------------------------------
-        # 核心策略回測邏輯 (含部位比率紀錄以計算收益)
+        # 核心策略回測邏輯
         # ----------------------------------------------------
         action_list = []
         reason_list = []
@@ -759,6 +759,98 @@ class TechnicalAnalysisEngine:
         return df
 
     # ----------------------------------------------------
+    # 💡 新增：空倉者當日建倉適性診斷（獨立評估）
+    # ----------------------------------------------------
+    @staticmethod
+    def diagnose_flat_position_entry(df: pd.DataFrame) -> tuple[str, str]:
+        if len(df) < 20:
+            return "數據不足", "歷史資料過短，無法診斷空倉建倉適性"
+
+        i = len(df) - 1
+        close_p = df['Close'].iloc[i]
+        open_p = df['Open'].iloc[i]
+        low_p = df['Low'].iloc[i]
+
+        m5 = df['MA5'].iloc[i]
+        m20 = df['MA20'].iloc[i]
+        m60 = df['MA60'].iloc[i]
+        m20_diff5 = df['MA20_Diff_5D'].iloc[i]
+
+        bb_u = df['BB_Upper'].iloc[i]
+        rsi = df['RSI14'].iloc[i]
+        prev_rsi = df['RSI14'].iloc[i-1]
+        rsi_diff_1 = df['RSI_Diff_1D'].iloc[i]
+
+        dif = df['DIF'].iloc[i]
+        dea = df['DEA'].iloc[i]
+        temp_val = df['Temperature'].iloc[i]
+        temp_ma10 = df['Temperature_MA10'].iloc[i]
+
+        # 否決條件
+        is_ma60_down = m60 < df['MA60'].iloc[i-1]
+        is_bear_market = is_ma60_down and (close_p < m60)
+        is_macd_underwater = (dif < 0) and (dea < 0)
+        cond_bear_or_underwater = is_bear_market or is_macd_underwater
+
+        bias_60 = (close_p - m60) / m60
+        cond_high_divergence = (bias_60 >= 0.25) and (temp_val > 75.0)
+
+        temp_ma10_declining = temp_ma10 < df['Temperature_MA10'].iloc[i-1]
+        cond_weak_hook = temp_ma10_declining and (temp_val < 50.0)
+
+        cond_ma20_up_5d = m20_diff5 > 0
+
+        # 模式 A 檢查
+        rsi_recent_oversold = (df['RSI14'].iloc[max(0, i-4):i+1] < 30.0).any()
+        mode_a_signal = rsi_recent_oversold and (rsi_diff_1 >= 8.0)
+
+        # 模式 B 檢查
+        cond_b_env = ((m20 > m60) or (dif > 0)) and (close_p > m60) and (dif > 0)
+        cond_b_rsi = (40.0 <= prev_rsi <= 50.0) and (rsi_diff_1 > 0)
+        touched_ma20_recent = (df['Low'].iloc[max(0, i-1):i+1] <= df['MA20'].iloc[max(0, i-1):i+1] * 1.015).any()
+        cond_b_price = (
+            touched_ma20_recent and (close_p > open_p) and (close_p > m5) and 
+            (df['MA20_Diff_1D'].iloc[i] > 0) and cond_ma20_up_5d and (close_p >= m20 * 1.01) and (low_p > df['Close'].iloc[i-1])
+        )
+        mode_b_signal = cond_b_env and cond_b_rsi and cond_b_price
+
+        # 模式 C 檢查
+        close_15d_max = df['Close'].iloc[max(0, i-14):i].max() if i >= 15 else df['Close'].iloc[:i].max()
+        cond_c_ma_align = (close_p > m20) and (m20 > m60) and cond_ma20_up_5d
+        cond_c_new_high = close_p > close_15d_max
+        cond_c_long_red = (close_p > open_p) and (close_p >= bb_u * 0.995)
+        mode_c_signal = cond_c_ma_align and cond_c_new_high and cond_c_long_red
+
+        # 診斷判定
+        reasons = []
+        
+        if mode_a_signal:
+            return "🟢 今日適合以【模式 A】建倉", f"近5日RSI曾<30且今日RSI急彈{rsi_diff_1:.1f}點，符合超賣強彈抄底條件（可試驗50%半倉）"
+
+        if mode_b_signal:
+            if cond_bear_or_underwater:
+                reasons.append("季線向下且股價在季線下，或MACD雙線在水下")
+            elif cond_high_divergence:
+                reasons.append("股價遠離季線>=25%且溫度>75度（高檔背離）")
+            elif cond_weak_hook:
+                reasons.append("市場溫度10日線下滑且溫度<50度（弱勢勾頭）")
+            else:
+                return "🟢 今日適合以【模式 B】預備建倉", "強勢回檔條件成立且MA20 5日趨勢向上，建議於下一交易日執行50%半倉建倉"
+
+        if mode_c_signal:
+            if cond_bear_or_underwater:
+                reasons.append("季線向下且股價在季線下，或MACD雙線在水下")
+            elif cond_weak_hook:
+                reasons.append("市場溫度10日線下滑且溫度<50度（弱勢勾頭）")
+            else:
+                return "🟢 今日適合以【模式 C】建倉", "多頭排列下創15日新高、MA20 5日趨勢向上且收盤達布林上軌0.995倍，符合平台突破條件（可建50%半倉）"
+
+        if reasons:
+            return "⚠️ 今日無適合建倉模式 (觸發否決)", f"雖然技術型態接近，但因【{'; '.join(reasons)}】被系統否決開倉"
+
+        return "🟡 今日無符合之建倉模式", "目前技術面未觸發模式A/B/C之任何建倉訊號，空倉者請繼續保持觀望"
+
+    # ----------------------------------------------------
     # ⚡ 專屬雷達診斷引擎
     # ----------------------------------------------------
     @staticmethod
@@ -1036,19 +1128,16 @@ with tab1:
                             st.caption(f"📡 行情數據來源：`{src_bt}`")
 
                         # ----------------------------------------------------
-                        # 📈 新增：選定區間收益百分比試算與對比模組
+                        # 選定區間收益百分比試算與對比模組
                         # ----------------------------------------------------
                         st.markdown("---")
                         st.markdown(f"#### 💰 選定區間績效試算報告 ({start_str} ～ {end_str})")
                         
-                        # 計算單純買入持有 (Buy & Hold) 收益率
                         bh_start_price = df_sub['Close'].iloc[0]
                         bh_end_price = df_sub['Close'].iloc[-1]
                         bh_return_pct = ((bh_end_price - bh_start_price) / bh_start_price) * 100.0
 
-                        # 計算策略動態持倉收益率與淨值曲線
                         daily_pct_change = df_sub['Close'].pct_change().fillna(0.0)
-                        # 前日持倉比率影響今日收益
                         shift_pos_ratio = df_sub['Position_Ratio'].shift(1).fillna(0.0)
                         strategy_daily_ret = daily_pct_change * shift_pos_ratio
                         
@@ -1070,17 +1159,27 @@ with tab1:
                         st.markdown("---")
                         st.markdown("#### 💡 當前最新策略操作建議與動態提醒")
                         
+                        # 1. 呈現歷史回測延續的持倉建議
                         act_text = latest['Advice_Action']
                         rsn_text = latest['Advice_Reason']
                         
                         if "100%清倉" in act_text or "離場" in act_text or "停損" in act_text:
-                            st.error(f"**【操作建議】{act_text}** — {rsn_text}")
+                            st.error(f"**【歷史持倉建議】{act_text}** — {rsn_text}")
                         elif "被禁用" in act_text or "否決" in act_text or "減倉" in act_text or "取消" in act_text:
-                            st.warning(f"**【操作建議】{act_text}** — {rsn_text}")
+                            st.warning(f"**【歷史持倉建議】{act_text}** — {rsn_text}")
                         elif "模式" in act_text or "建倉" in act_text or "補滿倉" in act_text or "續抱" in act_text:
-                            st.success(f"**【操作建議】{act_text}** — {rsn_text}")
+                            st.success(f"**【歷史持倉建議】{act_text}** — {rsn_text}")
                         else:
-                            st.info(f"**【操作建議】{act_text}** — {rsn_text}")
+                            st.info(f"**【歷史持倉建議】{act_text}** — {rsn_text}")
+
+                        # 2. 💡 新增：空倉者當日獨立建倉適性提示
+                        flat_title, flat_desc = TechnicalAnalysisEngine.diagnose_flat_position_entry(df_calc)
+                        if "🟢" in flat_title:
+                            st.success(f"**【空倉者今日建議】{flat_title}** — {flat_desc}")
+                        elif "⚠️" in flat_title:
+                            st.warning(f"**【空倉者今日建議】{flat_title}** — {flat_desc}")
+                        else:
+                            st.info(f"**【空倉者今日建議】{flat_title}** — {flat_desc}")
 
                         st.markdown("---")
                         st.markdown("#### 📊 最新市場指標總覽")
