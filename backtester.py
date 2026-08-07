@@ -87,6 +87,7 @@ class MultiSourceMarketData:
                             "Volume": rt_data['Volume']
                         }], index=[rt_date])
                         df = pd.concat([df, new_row])
+                        df.sort_index(inplace=True)
                     src += " + 證交所(TWSE)盤中即時"
             except Exception:
                 pass
@@ -665,12 +666,11 @@ class TechnicalAnalysisEngine:
             nh_overheat_take_profit = nh_active and (not nh_overheat_taken) and (nh_overheat_score >= 2) and (position_ratio > 0.6)
 
             nh_broke_ma10 = nh_active and (close_p < m10)
-            nh_breakout_low_failed = nh_active and (close_p < nh_breakout_low)
             nh_back_to_boll_mid_with_volume = nh_active and (close_p < m20) and (volume_ratio20 >= 1.20)
             nh_ma5_first_take_profit = nh_active and nh_broke_ma5 and (i == nh_ma5_break_index) and (position_ratio > 0.5)
             nh_ma5_not_recovered = nh_active and (nh_ma5_break_index >= 0) and ((i - nh_ma5_break_index) >= 1) and (close_p < m5)
             nh_temp_guard_reduce = nh_active and temp_death_cross and nh_broke_ma5 and (position_ratio > 0.3)
-            nh_temp_final_exit = nh_active and temp_death_cross and (nh_broke_ma10 or nh_breakout_low_failed or nh_back_to_boll_mid_with_volume)
+            nh_temp_final_exit = nh_active and temp_death_cross and (nh_broke_ma10 or nh_back_to_boll_mid_with_volume)
             nh_temp_near_guard = nh_active and temp_near_death_cross and (position_ratio > 0)
 
             # ----------------------------------------------------
@@ -697,18 +697,7 @@ class TechnicalAnalysisEngine:
 
             elif nh_temp_final_exit and in_position:
                 act = "🛑 新高守門員清倉(溫度死叉+價格破位)"
-                rsn = f"創高後第{nh_days_since_breakout}天出現溫度死叉(MA3={temp_ma3:.1f}, MA8={temp_ma8:.1f})，且跌破MA10/突破K低點/放量跌回布林中軌之一成立，判定主升浪結束"
-                in_position = False
-                position_ratio = 0.0
-                entry_mode = ""
-                mode_b_pending = False
-                nh_active = False
-                nh_ma5_break_index = -999
-                nh_overheat_taken = False
-
-            elif nh_breakout_low_failed and in_position:
-                act = "🛑 新高假突破清倉(跌破突破K低點)"
-                rsn = f"創高後收盤跌破突破K低點(${nh_breakout_low:.2f})，假突破確認，優先清倉"
+                rsn = f"創高後第{nh_days_since_breakout}天出現溫度死叉(MA3={temp_ma3:.1f}, MA8={temp_ma8:.1f})，且跌破MA10/放量跌回布林中軌之一成立，判定主升浪結束"
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
@@ -942,7 +931,7 @@ class TechnicalAnalysisEngine:
                 else:
                     if entry_mode == "NH":
                         act = "✊ 模式NH新高持倉中"
-                        rsn = f"當前持倉{int(position_ratio*100)}%，創高後優先看MA5/突破K低點；溫度死叉僅作最後守門員，未觸發價格破位前續抱"
+                        rsn = f"當前持倉{int(position_ratio*100)}%，創高後優先看MA5；溫度死叉僅作最後守門員，未觸發價格破位前續抱"
                     else:
                         act = f"✊ 模式{entry_mode}續抱中"
                         rsn = f"當前持倉{int(position_ratio*100)}%，未觸發清倉或減倉條件，行情運作正常"
@@ -1200,7 +1189,7 @@ class TechnicalAnalysisEngine:
         if "MACD死叉+跌破20日線" in primary_alert:
             diag_detail = f"今日MACD轉死叉且跌破月線(${m20:.2f})，觸發策略100%清倉防禦條件。"
         elif "溫度死叉" in primary_alert:
-            diag_detail = f"市場溫度短線已下穿長線(MA3={temp_ma3:.1f}, MA8={temp_ma8:.1f})；若同時跌破MA10或突破K低點，依新高策略作最後清倉守門。"
+            diag_detail = f"市場溫度短線已下穿長線(MA3={temp_ma3:.1f}, MA8={temp_ma8:.1f})；若同時跌破MA10，依新高策略作最後清倉守門。"
         elif "接近死叉" in primary_alert:
             diag_detail = f"市場溫度短長線差距收斂，屬創高後警戒訊號；未出現價格破位前不單獨賣出。"
         elif "高檔背離" in primary_alert or "從高檔彎頭" in primary_alert:
@@ -1410,7 +1399,7 @@ with tab1:
                             )
                         with p_col2:
                             st.caption(f"⏱️ 系統數據最後計算更新時間：`{now_str}`")
-                            st.caption(f"📡 行情數據來源：`{src_bt}`")
+                            st.caption(f"📡 行行情數據來源：`{src_bt}`")
 
                         # ----------------------------------------------------
                         # 選定區間收益百分比試算與對比模組
