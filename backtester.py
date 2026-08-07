@@ -643,12 +643,6 @@ class TechnicalAnalysisEngine:
                 nh_breakout_high = high_p
                 nh_ma5_break_index = -999
                 nh_overheat_taken = False
-                entry_mode = "NH"
-                entry_index = i
-                entry_price = close_p
-                entry_low = low_p
-                entry_temp = temp_val
-                entry_rsi = rsi
 
             nh_days_since_breakout = i - nh_breakout_index if nh_active else 999
             nh_broke_ma5 = nh_active and (close_p < m5)
@@ -1399,7 +1393,7 @@ with tab1:
                             )
                         with p_col2:
                             st.caption(f"⏱️ 系統數據最後計算更新時間：`{now_str}`")
-                            st.caption(f"📡 行行情數據來源：`{src_bt}`")
+                            st.caption(f"📡 行情數據來源：`{src_bt}`")
 
                         # ----------------------------------------------------
                         # 選定區間收益百分比試算與對比模組
