@@ -308,6 +308,14 @@ class TechnicalAnalysisEngine:
         df['PPO_Signal'] = df['PPO'].ewm(span=9, adjust=False).mean()
         df['PPO_Hist'] = df['PPO'] - df['PPO_Signal']
 
+        # 5. AVWAP (錨定成交量加權平均價) 計算
+        sub_start_dt = pd.to_datetime(display_start_date) if display_start_date else df.index[0]
+        df['Typical_Price'] = (df['High'] + df['Low'] + df['Close']) / 3.0
+        
+        mask = df.index >= sub_start_dt
+        df['AVWAP'] = np.nan
+        df.loc[mask, 'AVWAP'] = (df.loc[mask, 'Typical_Price'] * df.loc[mask, 'Volume']).cumsum() / df.loc[mask, 'Volume'].cumsum()
+
         # 主升浪背離與放量下跌判斷
         df['Close_20_Max'] = df['Close'].shift(1).rolling(20).max()
         df['PPO_20_Max'] = df['PPO'].shift(1).rolling(20).max()
@@ -316,7 +324,7 @@ class TechnicalAnalysisEngine:
         df['Divergence_Warning'] = df['Bearish_Divergence'].rolling(10).sum() > 0
         df['Vol_Surge_Drop'] = (df['Close'] < df['Close'].shift(1)) & (df['Volume'] >= df['Volume'].shift(1) * 1.4)
 
-        # 5. 市場溫度 T 計算
+        # 6. 市場溫度 T 計算
         df['Ret20'] = df['Close'].pct_change(20)
         df['Score_Rank20'] = df['Ret20'].rolling(60).apply(
             lambda x: (pd.Series(x).rank(pct=True).iloc[-1] * 100) if len(x) > 0 else 50, raw=False
@@ -403,8 +411,6 @@ class TechnicalAnalysisEngine:
         action_list = []
         reason_list = []
         pos_ratio_list = []
-
-        sub_start_dt = pd.to_datetime(display_start_date) if display_start_date else df.index[0]
 
         last_buy_index = -999
         in_position = False
@@ -526,7 +532,6 @@ class TechnicalAnalysisEngine:
             # ----------------------------------------------------
             ppo_dc = (ppo < ppo_sig) and (prev_ppo >= prev_ppo_sig)
             
-            # 定義K棒實體跌幅百分比
             k_body_drop_pct = ((open_p - close_p) / open_p) * 100.0 if open_p > 0 else 0.0
             ppo_dc_exit = ppo_dc and (close_p < m20) and (temp_val < temp_ma10) and (k_body_drop_pct > 2.0)
 
@@ -557,14 +562,6 @@ class TechnicalAnalysisEngine:
                 if mode_a_ma20_fail_flag and (close_p < m5):
                     if m10 > m5:
                         mode_a_ma20_fail_exit = True
-
-            # 清倉 2.7: 模式 A 最終防線 (自最高點回撤 > 10%)
-            mode_a_trailing_stop_exit = False
-            mode_a_highest_price = 0.0
-            if in_position and (entry_mode == "A"):
-                mode_a_highest_price = df['High'].iloc[entry_index:i+1].max()
-                if close_p < mode_a_highest_price * 0.90:
-                    mode_a_trailing_stop_exit = True
 
             # 清倉 3: 模式 B 高位獲利清倉
             close_20d_max = df['Close'].iloc[max(0, i-19):i+1].max()
@@ -642,14 +639,6 @@ class TechnicalAnalysisEngine:
             elif mode_a_weak_death_exit and in_position:
                 act = "🛑 模式A弱死亡清倉"
                 rsn = f"模式A建倉第4天回測，4天內溫度未創新高({entry_temp:.1f})，且溫度({temp_val:.1f})與RSI({rsi:.1f})皆負成長，動能衰竭清倉"
-                in_position = False
-                position_ratio = 0.0
-                entry_mode = ""
-                mode_a_ma20_fail_flag = False
-
-            elif mode_a_trailing_stop_exit and in_position:
-                act = "🛑 模式A最終防線(回撤>10%)"
-                rsn = f"模式A持倉中，收盤價(${close_p:.2f})自建倉後最高點(${mode_a_highest_price:.2f})回撤超過10%，觸發最後防線停損清倉"
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
@@ -1304,7 +1293,7 @@ with tab1:
                             vertical_spacing=0.025, 
                             row_heights=[0.35, 0.15, 0.15, 0.15, 0.2],
                             subplot_titles=(
-                                f"{bt_symbol} K線、MA5/10/20/60 均線與布林通道", 
+                                f"{bt_symbol} K線、均線、布林通道與 AVWAP", 
                                 "動態市場溫度 T (0-100)", 
                                 "RSI(14) 指標", 
                                 "PPO 百分位指標 (快線, 慢線, 柱狀圖)",
@@ -1328,6 +1317,9 @@ with tab1:
 
                         fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['BB_Upper'], mode='lines', name='布林上軌', line=dict(color='#AB47BC', width=1, dash='dash')), row=1, col=1)
                         fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['BB_Lower'], mode='lines', name='布林下軌', line=dict(color='#AB47BC', width=1, dash='dash')), row=1, col=1)
+                        
+                        # 新增：AVWAP
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['AVWAP'], mode='lines', name='AVWAP(區間錨定)', line=dict(color='#E91E63', width=2, dash='dot')), row=1, col=1)
 
                         # Row 2: 溫度
                         fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Temperature'], mode='lines', name='溫度 T', line=dict(color='#FF3D00', width=2)), row=2, col=1)
@@ -1370,9 +1362,10 @@ with tab1:
                         show_df['市場溫度 T'] = show_df['Temperature'].round(1)
                         show_df['RSI(14)'] = show_df['RSI14'].round(2)
                         show_df['PPO柱狀'] = show_df['PPO_Hist'].round(2)
+                        show_df['AVWAP'] = show_df['AVWAP'].round(2)
                         show_df['持倉比率'] = (show_df['Position_Ratio'] * 100).astype(int).astype(str) + "%"
                         
-                        show_cols = ["Open", "High", "Low", "Close", "Volume", "持倉比率", "市場溫度 T", "RSI(14)", "PPO柱狀", "Reason_5D", "Reason_20D", "Advice_Action", "Advice_Reason"]
+                        show_cols = ["Open", "High", "Low", "Close", "AVWAP", "Volume", "持倉比率", "市場溫度 T", "RSI(14)", "PPO柱狀", "Reason_5D", "Reason_20D", "Advice_Action", "Advice_Reason"]
                         rename_dict = {
                             "Reason_5D": "5日格局原因",
                             "Reason_20D": "20日格局原因",
