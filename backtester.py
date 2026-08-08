@@ -500,7 +500,7 @@ class TechnicalAnalysisEngine:
             # ----------------------------------------------------
             # 進場訊號觸發條件
             # ----------------------------------------------------
-            # 模式 A: 超賣強彈/抄底
+            # 模式 A: 超賣強彈/抄底 (RSI條件修改為<35)
             rsi_recent_oversold = (df['RSI14'].iloc[max(0, i-4):i+1] < 35.0).any()
             mode_a_buy_signal = rsi_recent_oversold and (rsi_diff_1 >= 8.0)
 
@@ -532,8 +532,8 @@ class TechnicalAnalysisEngine:
             # 清倉 1: 高檔背離後放量死叉清倉
             mode_divergence_exit = in_position and divergence_warning and vol_surge_drop and ppo_dc and (ppo < 50.0)
 
-            # 清倉 1.5: 主升浪創高後，PPO於90以上高位死叉
-            mode_high_ppo_dc_exit = in_position and recent_new_high and ppo_dc and (ppo >= 90.0)
+            # 清倉 1.5: 主升浪創高後，PPO於95以上高位死叉
+            mode_high_ppo_dc_exit = in_position and recent_new_high and ppo_dc and (ppo >= 95.0)
 
             # 清倉 2: 模式 A 虛高放棄建倉
             mode_a_fake_high_exit = (entry_mode == "A") and (temp_val > 80.0) and (close_p < entry_price * 1.03)
@@ -596,8 +596,8 @@ class TechnicalAnalysisEngine:
 
             # 1. 各項清倉機制優先檢測
             if mode_high_ppo_dc_exit:
-                act = "🛑 高位死叉清倉(PPO>90+創高)"
-                rsn = f"股價近期創出主升浪新高，但PPO於極高位(>90)出現死亡交叉({ppo:.1f}跌破訊號線)，動能極度過熱反轉，全數清倉"
+                act = "🛑 高位死叉清倉(PPO>95+創高)"
+                rsn = f"股價近期創出主升浪新高，但PPO於極高位(>95)出現死亡交叉({ppo:.1f}跌破訊號線)，動能極度過熱反轉，全數清倉"
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
@@ -938,7 +938,7 @@ class TechnicalAnalysisEngine:
         ppo_dc_under_50 = ppo_dc and (ppo < 50.0)
         
         recent_new_high = (df['Close'].iloc[-5:] > df['Close'].shift(1).rolling(20).max().iloc[-5:]).any() if len(df) >= 25 else False
-        ppo_dc_above_90 = ppo_dc and (ppo >= 90.0) and recent_new_high
+        ppo_dc_above_95 = ppo_dc and (ppo >= 95.0) and recent_new_high
         
         if (close_p > m20) and (m20 > m60) and (45.0 <= rsi <= 62.0) and (ppo > ppo_sig) and not is_high_temp:
             setup_status = "🟢 極佳 (順勢發動)"
@@ -952,8 +952,8 @@ class TechnicalAnalysisEngine:
             setup_status = "🟡 一般 (震盪觀望)"
 
         alerts = []
-        if ppo_dc_above_90:
-            alerts.append("🛑 創高後PPO高位(>90)死叉(觸發清倉)")
+        if ppo_dc_above_95:
+            alerts.append("🛑 創高後PPO高位(>95)死叉(觸發清倉)")
         elif divergence_warning and vol_surge_drop and ppo_dc_under_50:
             alerts.append("🛑 高檔背離放量死叉(觸發清倉)")
         elif ppo_dc and (close_p < m20):
@@ -978,8 +978,8 @@ class TechnicalAnalysisEngine:
 
         primary_alert = " | ".join(alerts) if alerts else "✅ 技術面平穩運行"
 
-        if "PPO高位(>90)死叉" in primary_alert:
-            diag_detail = f"發生股價創主升浪新高後，PPO於極高位(>90)死亡交叉，觸發全面清倉防禦條件。"
+        if "PPO高位(>95)死叉" in primary_alert:
+            diag_detail = f"發生股價創主升浪新高後，PPO於極高位(>95)死亡交叉，觸發全面清倉防禦條件。"
         elif "高檔背離放量死叉" in primary_alert:
             diag_detail = f"發生價創新高但PPO未創新的背離，且今日放量下跌並形成低於50的死亡交叉，觸發全面清倉防禦條件。"
         elif "PPO死叉+跌破20日線" in primary_alert:
