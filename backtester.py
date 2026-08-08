@@ -286,7 +286,7 @@ class TechnicalAnalysisEngine:
         df['Vol_MA5'] = df['Volume'].rolling(5).mean()
         df['Daily_Vol_Ratio'] = df['Volume'] / df['Vol_MA5'].shift(1)
 
-        # 3. RSI(14) 與變化量
+        # 3. RSI(14) 與前低點判定
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
@@ -295,11 +295,13 @@ class TechnicalAnalysisEngine:
         df['RSI_Diff_1D'] = df['RSI14'].diff(1)
         df['RSI_Diff_2D'] = df['RSI14'].diff(2)
         df['RSI_Diff_5D'] = df['RSI14'].diff(5)
+        df['RSI_Prev_Low'] = df['RSI14'].rolling(14).min().shift(1)
 
         # 4. PPO 滾動百分位計算 (跨股票標準化，替換原生 PPO)
         ema12 = df['Close'].ewm(span=12, adjust=False).mean()
         ema26 = df['Close'].ewm(span=26, adjust=False).mean()
         ppo_raw = ((ema12 - ema26) / ema26) * 100.0
+        df['PPO_Raw'] = ppo_raw
 
         # 將 PPO 轉換為 60 日滾動百分位 (0~100)，50 為多空強弱分界
         df['PPO'] = ppo_raw.rolling(60).apply(
@@ -412,6 +414,10 @@ class TechnicalAnalysisEngine:
         entry_temp = 0.0
         entry_rsi = 0.0
         
+        pos_high_price = 0.0
+        pos_high_temp = 0.0
+        pos_high_idx = -999
+        
         mode_a_ma20_fail_flag = False
         mode_a_search_new_low = False
         mode_a_search_start_idx = -999
@@ -472,6 +478,13 @@ class TechnicalAnalysisEngine:
             temp_val = df['Temperature'].iloc[i]
             prev_temp_val = df['Temperature'].iloc[i-1]
             temp_ma10 = df['Temperature_MA10'].iloc[i]
+            
+            # 動態更新持倉期間最高價與對應溫度
+            if in_position:
+                if close_p > pos_high_price:
+                    pos_high_price = close_p
+                    pos_high_temp = temp_val
+                    pos_high_idx = i
 
             # ----------------------------------------------------
             # 濾網條件計算
@@ -519,6 +532,22 @@ class TechnicalAnalysisEngine:
             # ----------------------------------------------------
             ppo_dc = (ppo < ppo_sig) and (prev_ppo >= prev_ppo_sig)
             ppo_dc_exit = ppo_dc and (close_p < m20) and (temp_val < temp_ma10)
+
+            # 清倉 1.5: 高檔爆量反轉清倉
+            mode_high_crash_exit = False
+            if in_position:
+                days_since_high = i - pos_high_idx
+                if 0 <= days_since_high <= 5:
+                    ppo_raw_val = df['PPO_Raw'].iloc[i]
+                    prev_ppo_raw = df['PPO_Raw'].iloc[i-1]
+                    ppo_cross_neg = (prev_ppo_raw > 0) and (ppo_raw_val < 0)
+                    temp_drop_30 = (pos_high_temp - temp_val) > 30.0
+                    rsi_break_low = rsi < df['RSI_Prev_Low'].iloc[i]
+                    prev_close = df['Close'].iloc[i-1]
+                    heavy_drop = (close_p < prev_close) and (df['Daily_Vol_Ratio'].iloc[i] > 1.5)
+                    
+                    if ppo_cross_neg and temp_drop_30 and rsi_break_low and heavy_drop:
+                        mode_high_crash_exit = True
 
             # 清倉 2: 模式 A 虛高放棄建倉
             mode_a_fake_high_exit = (entry_mode == "A") and (temp_val > 80.0) and (close_p < entry_price * 1.03)
@@ -580,7 +609,16 @@ class TechnicalAnalysisEngine:
                 mode_a_search_new_low = False
 
             # 1. 各項清倉機制優先檢測
-            if ppo_dc_exit and in_position:
+            if mode_high_crash_exit and in_position:
+                act = "🛑 高檔爆量反轉(反彈清倉)"
+                rsn = f"創高5日內原生PPO轉負、溫度自高點({pos_high_temp:.1f})驟降>30度、RSI跌破前低且當日大放量下跌，預期隔日反彈，執行全數清倉"
+                in_position = False
+                position_ratio = 0.0
+                entry_mode = ""
+                mode_b_pending = False
+                mode_a_ma20_fail_flag = False
+
+            elif ppo_dc_exit and in_position:
                 act = "🛑 100%清倉(PPO死叉+跌破MA20+趨勢轉空)"
                 rsn = f"PPO出現死叉且收盤價(${close_p:.2f})跌破MA20(${m20:.2f})，T({temp_val:.1f})小於T10均，趨勢轉空，無條件全數清倉"
                 in_position = False
@@ -672,6 +710,10 @@ class TechnicalAnalysisEngine:
                     position_ratio = 0.5
                     entry_mode = "B"
                     mode_b_pending = False
+                    
+                    pos_high_price = close_p
+                    pos_high_temp = temp_val
+                    pos_high_idx = i
 
             # 4. 加倉機制檢測
             elif (position_ratio == 0.5) and (close_p > m20) and (bb_u_diff5 > 0):
@@ -703,6 +745,10 @@ class TechnicalAnalysisEngine:
                     entry_mode = "A"
                     mode_a_search_new_low = False
                     mode_a_ma20_fail_flag = False
+                    
+                    pos_high_price = close_p
+                    pos_high_temp = temp_val
+                    pos_high_idx = i
                 else:
                     act = "🔍 模式A尋找新低點中"
                     rsn = f"離場後尋找新低點第{days_searching}/7天，等待股價觸及布林下軌(${bb_l:.2f})並跌破前低(${mode_a_last_exit_min_low:.2f})"
@@ -722,6 +768,10 @@ class TechnicalAnalysisEngine:
                     position_ratio = 0.5
                     entry_mode = "A"
                     mode_a_ma20_fail_flag = False
+                    
+                    pos_high_price = close_p
+                    pos_high_temp = temp_val
+                    pos_high_idx = i
 
                 elif mode_b_buy_signal:
                     if cond_bear_or_underwater:
@@ -758,6 +808,10 @@ class TechnicalAnalysisEngine:
                         in_position = True
                         position_ratio = 0.5
                         entry_mode = "C"
+                        
+                        pos_high_price = close_p
+                        pos_high_temp = temp_val
+                        pos_high_idx = i
 
             elif in_position:
                 if entry_mode == "A" and 1 <= days_since_entry <= 7 and mode_a_ma20_fail_flag and (close_p < m5) and (m10 <= m5):
@@ -1182,7 +1236,7 @@ with tab1:
                         act_text = latest['Advice_Action']
                         rsn_text = latest['Advice_Reason']
                         
-                        if "100%清倉" in act_text or "離場" in act_text or "停損" in act_text:
+                        if "100%清倉" in act_text or "離場" in act_text or "停損" in act_text or "反彈清倉" in act_text:
                             st.error(f"**【歷史持倉建議】{act_text}** — {rsn_text}")
                         elif "被禁用" in act_text or "否決" in act_text or "減倉" in act_text or "取消" in act_text:
                             st.warning(f"**【歷史持倉建議】{act_text}** — {rsn_text}")
