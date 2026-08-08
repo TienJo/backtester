@@ -564,7 +564,7 @@ class TechnicalAnalysisEngine:
             mode_b_exit_near_high = (entry_mode == "B") and is_near_20d_high and (prev_temp_val > 80.0) and ppo_dc_exit
 
             # 清倉 4: 模式 C 動能衰竭清倉
-            mode_c_ppo_exhaust_exit = (entry_mode == "C") and (ppo > 50.0) and (ppo_hist < 5.0) and ((prev_ppo_hist - ppo_hist) >= 5.0)
+            mode_c_ppo_exhaust_exit = (entry_mode == "C") and (ppo > 50.0) and (ppo_hist < 6.0) and ((prev_ppo_hist - ppo_hist) >= 6.0)
 
             # 清倉 5: 模式 B/C 三日認錯停損
             mode_bc_3d_failed = in_position and (entry_mode in ["B", "C"]) and (1 <= days_since_entry <= 3) and (close_p < entry_low)
@@ -648,7 +648,7 @@ class TechnicalAnalysisEngine:
 
             elif mode_c_ppo_exhaust_exit and in_position:
                 act = "🛑 模式C動能衰竭清倉"
-                rsn = f"模式C持倉中PPO水上百分位柱狀體({ppo_hist:.2f})<5且較前日驟降({prev_ppo_hist - ppo_hist:.2f}>=5)，動能失血清倉"
+                rsn = f"模式C持倉中PPO水上百分位柱狀體({ppo_hist:.2f})<6且較前日驟降({prev_ppo_hist - ppo_hist:.2f}>=6)，動能失血清倉"
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
