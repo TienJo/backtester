@@ -558,6 +558,14 @@ class TechnicalAnalysisEngine:
                     if m10 > m5:
                         mode_a_ma20_fail_exit = True
 
+            # 清倉 2.7: 模式 A 最終防線 (自最高點回撤 > 10%)
+            mode_a_trailing_stop_exit = False
+            mode_a_highest_price = 0.0
+            if in_position and (entry_mode == "A"):
+                mode_a_highest_price = df['High'].iloc[entry_index:i+1].max()
+                if close_p < mode_a_highest_price * 0.90:
+                    mode_a_trailing_stop_exit = True
+
             # 清倉 3: 模式 B 高位獲利清倉
             close_20d_max = df['Close'].iloc[max(0, i-19):i+1].max()
             is_near_20d_high = close_p >= (close_20d_max * 0.98)
@@ -634,6 +642,14 @@ class TechnicalAnalysisEngine:
             elif mode_a_weak_death_exit and in_position:
                 act = "🛑 模式A弱死亡清倉"
                 rsn = f"模式A建倉第4天回測，4天內溫度未創新高({entry_temp:.1f})，且溫度({temp_val:.1f})與RSI({rsi:.1f})皆負成長，動能衰竭清倉"
+                in_position = False
+                position_ratio = 0.0
+                entry_mode = ""
+                mode_a_ma20_fail_flag = False
+
+            elif mode_a_trailing_stop_exit and in_position:
+                act = "🛑 模式A最終防線(回撤>10%)"
+                rsn = f"模式A持倉中，收盤價(${close_p:.2f})自建倉後最高點(${mode_a_highest_price:.2f})回撤超過10%，觸發最後防線停損清倉"
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
