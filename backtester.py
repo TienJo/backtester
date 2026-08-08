@@ -308,7 +308,15 @@ class TechnicalAnalysisEngine:
         df['PPO_Signal'] = df['PPO'].ewm(span=9, adjust=False).mean()
         df['PPO_Hist'] = df['PPO'] - df['PPO_Signal']
 
-        # 5. AVWAP (錨定成交量加權平均價) 計算
+        # 5. SKDJ (慢速 KD 指標) 計算 (9, 3, 3)
+        low_9 = df['Low'].rolling(9).min()
+        high_9 = df['High'].rolling(9).max()
+        rsv = (df['Close'] - low_9) / (high_9 - low_9).replace(0, np.nan) * 100.0
+        rsv = rsv.fillna(50.0)
+        df['SKDJ_K'] = rsv.ewm(span=3, adjust=False).mean()
+        df['SKDJ_D'] = df['SKDJ_K'].ewm(span=3, adjust=False).mean()
+
+        # 6. AVWAP (錨定成交量加權平均價) 計算
         sub_start_dt = pd.to_datetime(display_start_date) if display_start_date else df.index[0]
         df['Typical_Price'] = (df['High'] + df['Low'] + df['Close']) / 3.0
         
@@ -324,7 +332,7 @@ class TechnicalAnalysisEngine:
         df['Divergence_Warning'] = df['Bearish_Divergence'].rolling(10).sum() > 0
         df['Vol_Surge_Drop'] = (df['Close'] < df['Close'].shift(1)) & (df['Volume'] >= df['Volume'].shift(1) * 1.4)
 
-        # 6. 市場溫度 T 計算
+        # 7. 市場溫度 T 計算
         df['Ret20'] = df['Close'].pct_change(20)
         df['Score_Rank20'] = df['Ret20'].rolling(60).apply(
             lambda x: (pd.Series(x).rank(pct=True).iloc[-1] * 100) if len(x) > 0 else 50, raw=False
@@ -1285,17 +1293,18 @@ with tab1:
                             st.info(f"**📌 20日中期格局原因：** {latest['Reason_20D']}")
 
                         st.markdown("---")
-                        st.markdown("#### 🎯 K線、市場溫度、RSI、PPO百分位 與 策略績效淨值曲線 五圖對照")
+                        st.markdown("#### 🎯 K線、市場溫度、RSI、SKDJ、PPO百分位 與 策略績效淨值曲線")
 
                         fig = make_subplots(
-                            rows=5, cols=1, 
+                            rows=6, cols=1, 
                             shared_xaxes=True, 
-                            vertical_spacing=0.025, 
-                            row_heights=[0.35, 0.15, 0.15, 0.15, 0.2],
+                            vertical_spacing=0.02, 
+                            row_heights=[0.3, 0.12, 0.12, 0.12, 0.12, 0.22],
                             subplot_titles=(
                                 f"{bt_symbol} K線、均線、布林通道與 AVWAP", 
                                 "動態市場溫度 T (0-100)", 
                                 "RSI(14) 指標", 
+                                "SKDJ 指標 (9, 3, 3)",
                                 "PPO 百分位指標 (快線, 慢線, 柱狀圖)",
                                 "累積收益率淨值曲線對比 (初始基準 = 1.0)"
                             )
@@ -1318,7 +1327,6 @@ with tab1:
                         fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['BB_Upper'], mode='lines', name='布林上軌', line=dict(color='#AB47BC', width=1, dash='dash')), row=1, col=1)
                         fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['BB_Lower'], mode='lines', name='布林下軌', line=dict(color='#AB47BC', width=1, dash='dash')), row=1, col=1)
                         
-                        # 新增：AVWAP
                         fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['AVWAP'], mode='lines', name='AVWAP(區間錨定)', line=dict(color='#E91E63', width=2, dash='dot')), row=1, col=1)
 
                         # Row 2: 溫度
@@ -1333,25 +1341,31 @@ with tab1:
                         fig.add_hline(y=50, line_dash="dash", line_color="#CCCCCC", row=3, col=1)
                         fig.add_hline(y=30, line_dash="dot", line_color="#B9F6CA", row=3, col=1)
 
-                        # Row 4: PPO 百分位
-                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['PPO'], mode='lines', name='PPO 百分位(快線)', line=dict(color='#2962FF', width=1.2)), row=4, col=1)
-                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['PPO_Signal'], mode='lines', name='PPO_Signal (慢線)', line=dict(color='#FF6D00', width=1.2)), row=4, col=1)
+                        # Row 4: SKDJ
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['SKDJ_K'], mode='lines', name='SKDJ_K', line=dict(color='#E91E63', width=1.2)), row=4, col=1)
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['SKDJ_D'], mode='lines', name='SKDJ_D', line=dict(color='#00BCD4', width=1.2)), row=4, col=1)
+                        fig.add_hline(y=80, line_dash="dot", line_color="#FF8A80", row=4, col=1)
+                        fig.add_hline(y=20, line_dash="dot", line_color="#B9F6CA", row=4, col=1)
+
+                        # Row 5: PPO 百分位
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['PPO'], mode='lines', name='PPO 百分位(快線)', line=dict(color='#2962FF', width=1.2)), row=5, col=1)
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['PPO_Signal'], mode='lines', name='PPO_Signal (慢線)', line=dict(color='#FF6D00', width=1.2)), row=5, col=1)
                         
                         ppo_colors = ['#26a69a' if h >= 0 else '#ef5350' for h in df_sub['PPO_Hist']]
-                        fig.add_trace(go.Bar(x=df_sub.index, y=df_sub['PPO_Hist'], name='PPO 柱狀圖', marker_color=ppo_colors), row=4, col=1)
-                        fig.add_hline(y=50, line_dash="solid", line_color="#9E9E9E", row=4, col=1)
-                        fig.add_hline(y=0, line_dash="solid", line_color="#9E9E9E", row=4, col=1)
+                        fig.add_trace(go.Bar(x=df_sub.index, y=df_sub['PPO_Hist'], name='PPO 柱狀圖', marker_color=ppo_colors), row=5, col=1)
+                        fig.add_hline(y=50, line_dash="solid", line_color="#9E9E9E", row=5, col=1)
+                        fig.add_hline(y=0, line_dash="solid", line_color="#9E9E9E", row=5, col=1)
 
-                        # Row 5: 淨值曲線
-                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Strategy_Equity'], mode='lines', name='策略動態淨值', line=dict(color='#2E7D32', width=2)), row=5, col=1)
-                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['BH_Equity'], mode='lines', name='買入持有淨值', line=dict(color='#757575', width=1.5, dash='dot')), row=5, col=1)
-                        fig.add_hline(y=1.0, line_dash="solid", line_color="#E0E0E0", row=5, col=1)
+                        # Row 6: 淨值曲線
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Strategy_Equity'], mode='lines', name='策略動態淨值', line=dict(color='#2E7D32', width=2)), row=6, col=1)
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['BH_Equity'], mode='lines', name='買入持有淨值', line=dict(color='#757575', width=1.5, dash='dot')), row=6, col=1)
+                        fig.add_hline(y=1.0, line_dash="solid", line_color="#E0E0E0", row=6, col=1)
 
                         fig.update_layout(
                             xaxis_rangeslider_visible=False,
                             hovermode="x unified",
                             template="plotly_white",
-                            height=1000
+                            height=1200
                         )
                         st.plotly_chart(fig, use_container_width=True)
 
@@ -1361,11 +1375,13 @@ with tab1:
                         show_df = df_sub.copy()
                         show_df['市場溫度 T'] = show_df['Temperature'].round(1)
                         show_df['RSI(14)'] = show_df['RSI14'].round(2)
+                        show_df['SKDJ_K'] = show_df['SKDJ_K'].round(2)
+                        show_df['SKDJ_D'] = show_df['SKDJ_D'].round(2)
                         show_df['PPO柱狀'] = show_df['PPO_Hist'].round(2)
                         show_df['AVWAP'] = show_df['AVWAP'].round(2)
                         show_df['持倉比率'] = (show_df['Position_Ratio'] * 100).astype(int).astype(str) + "%"
                         
-                        show_cols = ["Open", "High", "Low", "Close", "AVWAP", "Volume", "持倉比率", "市場溫度 T", "RSI(14)", "PPO柱狀", "Reason_5D", "Reason_20D", "Advice_Action", "Advice_Reason"]
+                        show_cols = ["Open", "High", "Low", "Close", "AVWAP", "Volume", "持倉比率", "市場溫度 T", "RSI(14)", "SKDJ_K", "SKDJ_D", "PPO柱狀", "Reason_5D", "Reason_20D", "Advice_Action", "Advice_Reason"]
                         rename_dict = {
                             "Reason_5D": "5日格局原因",
                             "Reason_20D": "20日格局原因",
