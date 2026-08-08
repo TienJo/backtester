@@ -573,10 +573,10 @@ class TechnicalAnalysisEngine:
                     if m10 > m5:
                         mode_a_ma20_fail_exit = True
                         
-            # 清倉 2.7: 模式 A ATR 回撤守門員 (棘輪鎖定版)
+            # 清倉 2.7: 模式 A ATR 回撤守門員 (棘輪鎖定版，3.2倍ATR)
             mode_a_atr_exit = False
             if in_position and (entry_mode == "A"):
-                current_potential_stop = high_p - (3.5 * atr)
+                current_potential_stop = high_p - (3.2 * atr)
                 if current_potential_stop > mode_a_atr_stop:
                     mode_a_atr_stop = current_potential_stop
                     
@@ -671,7 +671,7 @@ class TechnicalAnalysisEngine:
 
             elif mode_a_atr_exit and in_position:
                 act = "🛑 模式A最後防線(ATR棘輪停損)"
-                rsn = f"模式A持倉未觸發其他條件，但收盤價(${close_p:.2f})跌破動態鎖定的ATR停損線(${mode_a_atr_stop:.2f})，觸發最後守門底線，全數清倉"
+                rsn = f"模式A持倉未觸發其他條件，但收盤價(${close_p:.2f})跌破動態鎖定的ATR停損線(${mode_a_atr_stop:.2f})，觸發最後守門底線(3.2倍ATR)，全數清倉"
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
@@ -765,7 +765,7 @@ class TechnicalAnalysisEngine:
                     mode_a_search_new_low = False
                     mode_a_ma20_fail_flag = False
                     mode_a_highest_high = high_p
-                    mode_a_atr_stop = close_p - (3.5 * atr)
+                    mode_a_atr_stop = close_p - (3.2 * atr)
                 else:
                     act = "🔍 模式A尋找新低點中"
                     rsn = f"離場後尋找新低點第{days_searching}/7天，等待股價觸及布林下軌(${bb_l:.2f})並跌破前低(${mode_a_last_exit_min_low:.2f})"
@@ -786,7 +786,7 @@ class TechnicalAnalysisEngine:
                     entry_mode = "A"
                     mode_a_ma20_fail_flag = False
                     mode_a_highest_high = high_p
-                    mode_a_atr_stop = close_p - (3.5 * atr)
+                    mode_a_atr_stop = close_p - (3.2 * atr)
 
                 elif mode_b_buy_signal:
                     if cond_bear_or_underwater:
