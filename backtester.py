@@ -286,7 +286,7 @@ class TechnicalAnalysisEngine:
         df['Vol_MA5'] = df['Volume'].rolling(5).mean()
         df['Daily_Vol_Ratio'] = df['Volume'] / df['Vol_MA5'].shift(1)
 
-        # 3. RSI(14) 與 ATR(14) 計算
+        # 3. RSI(14) 與變化量
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
@@ -295,12 +295,12 @@ class TechnicalAnalysisEngine:
         df['RSI_Diff_1D'] = df['RSI14'].diff(1)
         df['RSI_Diff_2D'] = df['RSI14'].diff(2)
         df['RSI_Diff_5D'] = df['RSI14'].diff(5)
-
-        # 新增 ATR(14) 用於停損計算
+        
+        # ATR(14) 計算 (防禦回撤使用)
         df['Prev_Close'] = df['Close'].shift(1)
-        df['TR'] = np.maximum(df['High'] - df['Low'], 
-                   np.maximum(abs(df['High'] - df['Prev_Close']), 
-                              abs(df['Low'] - df['Prev_Close'])))
+        df['TR'] = np.maximum(df['High'] - df['Low'],
+                              np.maximum(abs(df['High'] - df['Prev_Close']),
+                                         abs(df['Low'] - df['Prev_Close'])))
         df['ATR14'] = df['TR'].rolling(window=14).mean()
 
         # 4. PPO 滾動百分位計算
@@ -427,6 +427,7 @@ class TechnicalAnalysisEngine:
         mode_a_search_new_low = False
         mode_a_search_start_idx = -999
         mode_a_last_exit_min_low = 999999.0
+        mode_a_highest_high = 0.0
         
         mode_b_pending = False
         mode_b_pending_low = 0.0
@@ -472,7 +473,7 @@ class TechnicalAnalysisEngine:
             rsi = df['RSI14'].iloc[i]
             prev_rsi = df['RSI14'].iloc[i-1]
             rsi_diff_1 = df['RSI_Diff_1D'].iloc[i]
-            atr_val = df['ATR14'].iloc[i]
+            atr = df['ATR14'].iloc[i]
 
             ppo = df['PPO'].iloc[i]
             ppo_sig = df['PPO_Signal'].iloc[i]
@@ -487,6 +488,11 @@ class TechnicalAnalysisEngine:
 
             divergence_warning = df['Divergence_Warning'].iloc[i]
             vol_surge_drop = df['Vol_Surge_Drop'].iloc[i]
+
+            # 動態更新模式A建倉以來的最高價
+            if in_position and entry_mode == "A":
+                if high_p > mode_a_highest_high:
+                    mode_a_highest_high = high_p
 
             # ----------------------------------------------------
             # 濾網條件計算
@@ -565,13 +571,11 @@ class TechnicalAnalysisEngine:
                 if mode_a_ma20_fail_flag and (close_p < m5):
                     if m10 > m5:
                         mode_a_ma20_fail_exit = True
-
-            # 清倉 2.7: 模式 A 3倍 ATR 移動停損 (最後守門)
+                        
+            # 清倉 2.7: 模式 A ATR 回撤守門員
             mode_a_atr_exit = False
-            mode_a_max_high = 0.0
             if in_position and (entry_mode == "A"):
-                mode_a_max_high = df['High'].iloc[entry_index:i+1].max()
-                if close_p < (mode_a_max_high - 3.0 * atr_val):
+                if close_p < (mode_a_highest_high - 3.5 * atr):
                     mode_a_atr_exit = True
 
             # 清倉 3: 模式 B 高位獲利清倉
@@ -627,14 +631,6 @@ class TechnicalAnalysisEngine:
                 mode_b_pending = False
                 mode_a_ma20_fail_flag = False
 
-            elif mode_a_atr_exit and in_position:
-                act = "🛑 模式A觸發ATR移動停損"
-                rsn = f"模式A建倉後創下最高價(${mode_a_max_high:.2f})，今日收盤跌破3倍ATR防守線(${mode_a_max_high - 3.0 * atr_val:.2f})，觸發最後守門防禦，無條件全數清倉"
-                in_position = False
-                position_ratio = 0.0
-                entry_mode = ""
-                mode_a_ma20_fail_flag = False
-
             elif mode_a_ma20_fail_exit and in_position:
                 act = "🛑 模式A觸碰MA20受阻跌破MA5清倉"
                 rsn = f"模式A建倉7天內陽線未能攻克MA20(${m20:.2f})，今日跌破MA5(${m5:.2f})且MA10(${m10:.2f})>MA5，執行清倉並開啟最長7天新低點鎖定"
@@ -658,6 +654,14 @@ class TechnicalAnalysisEngine:
             elif mode_a_weak_death_exit and in_position:
                 act = "🛑 模式A弱死亡清倉"
                 rsn = f"模式A建倉第4天回測，4天內溫度未創新高({entry_temp:.1f})，且溫度({temp_val:.1f})與RSI({rsi:.1f})皆負成長，動能衰竭清倉"
+                in_position = False
+                position_ratio = 0.0
+                entry_mode = ""
+                mode_a_ma20_fail_flag = False
+
+            elif mode_a_atr_exit and in_position:
+                act = "🛑 模式A最後防線(ATR回撤清倉)"
+                rsn = f"模式A持倉未觸發其他條件，但收盤價(${close_p:.2f})從建倉後最高點(${mode_a_highest_high:.2f})回撤超過3.5倍ATR(ATR={atr:.2f})，觸發最後守門底線，全數清倉"
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
@@ -749,6 +753,7 @@ class TechnicalAnalysisEngine:
                     entry_mode = "A"
                     mode_a_search_new_low = False
                     mode_a_ma20_fail_flag = False
+                    mode_a_highest_high = high_p
                 else:
                     act = "🔍 模式A尋找新低點中"
                     rsn = f"離場後尋找新低點第{days_searching}/7天，等待股價觸及布林下軌(${bb_l:.2f})並跌破前低(${mode_a_last_exit_min_low:.2f})"
@@ -768,6 +773,7 @@ class TechnicalAnalysisEngine:
                     position_ratio = 0.5
                     entry_mode = "A"
                     mode_a_ma20_fail_flag = False
+                    mode_a_highest_high = high_p
 
                 elif mode_b_buy_signal:
                     if cond_bear_or_underwater:
