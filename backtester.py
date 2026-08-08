@@ -525,7 +525,10 @@ class TechnicalAnalysisEngine:
             # 出場與清倉機制條件
             # ----------------------------------------------------
             ppo_dc = (ppo < ppo_sig) and (prev_ppo >= prev_ppo_sig)
-            ppo_dc_exit = ppo_dc and (close_p < m20) and (temp_val < temp_ma10)
+            
+            # 定義K棒實體跌幅百分比
+            k_body_drop_pct = ((open_p - close_p) / open_p) * 100.0 if open_p > 0 else 0.0
+            ppo_dc_exit = ppo_dc and (close_p < m20) and (temp_val < temp_ma10) and (k_body_drop_pct > 2.0)
 
             # 清倉 1: 高檔背離後放量死叉清倉
             mode_divergence_exit = in_position and divergence_warning and vol_surge_drop and ppo_dc and (ppo < 50.0)
@@ -600,8 +603,8 @@ class TechnicalAnalysisEngine:
                 mode_a_ma20_fail_flag = False
 
             elif ppo_dc_exit and in_position:
-                act = "🛑 100%清倉(PPO死叉+跌破MA20+趨勢轉空)"
-                rsn = f"PPO出現死叉且收盤價(${close_p:.2f})跌破MA20(${m20:.2f})，T({temp_val:.1f})小於T10均，趨勢轉空，無條件全數清倉"
+                act = "🛑 100%清倉(PPO死叉+跌破MA20+實體大跌)"
+                rsn = f"PPO出現死叉且收盤價(${close_p:.2f})跌破MA20(${m20:.2f})，T({temp_val:.1f})小於T10均，且當天K棒實體跌幅達{k_body_drop_pct:.1f}%(>2%)，趨勢轉空，無條件全數清倉"
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
@@ -923,6 +926,8 @@ class TechnicalAnalysisEngine:
         ppo_dc = (ppo < ppo_sig) and (prev_1['PPO'] >= prev_1['PPO_Signal'])
         ppo_dc_under_50 = ppo_dc and (ppo < 50.0)
         
+        k_body_drop_pct = ((latest['Open'] - close_p) / latest['Open']) * 100.0 if latest['Open'] > 0 else 0.0
+        
         if (close_p > m20) and (m20 > m60) and (45.0 <= rsi <= 62.0) and (ppo > ppo_sig) and not is_high_temp:
             setup_status = "🟢 極佳 (順勢發動)"
         elif is_rsi_oversold and (ppo_hist > prev_ppo_hist):
@@ -937,8 +942,8 @@ class TechnicalAnalysisEngine:
         alerts = []
         if divergence_warning and vol_surge_drop and ppo_dc_under_50:
             alerts.append("🛑 高檔背離放量死叉(觸發清倉)")
-        elif ppo_dc and (close_p < m20):
-            alerts.append("🛑 PPO死叉+跌破20日線(觸發清倉)")
+        elif ppo_dc and (close_p < m20) and (temp < temp_ma10) and (k_body_drop_pct > 2.0):
+            alerts.append("🛑 PPO死叉+跌破20日線且實體大跌(觸發清倉)")
             
         if ppo_gc and is_high_temp:
             alerts.append("⚠️ PPO高位金叉(慎防高檔背離)")
@@ -961,8 +966,8 @@ class TechnicalAnalysisEngine:
 
         if "高檔背離放量死叉" in primary_alert:
             diag_detail = f"發生價創新高但PPO未創新的背離，且今日放量下跌並形成低於50的死亡交叉，觸發全面清倉防禦條件。"
-        elif "PPO死叉+跌破20日線" in primary_alert:
-            diag_detail = f"今日PPO轉死叉且跌破月線(${m20:.2f})，觸發策略100%清倉防禦條件。"
+        elif "跌破20日線且實體大跌" in primary_alert:
+            diag_detail = f"今日PPO轉死叉且跌破月線(${m20:.2f})，T({temp:.1f})<T10均，且K棒實體跌幅達{k_body_drop_pct:.1f}%(>2%)，觸發策略100%清倉防禦條件。"
         elif "高檔背離" in primary_alert or "從高檔彎頭" in primary_alert:
             diag_detail = f"市場溫度高達{temp:.1f}°C，股價遠離季線，慎防高檔背離拉回。"
         elif "順勢發動" in setup_status:
