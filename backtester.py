@@ -326,7 +326,6 @@ class TechnicalAnalysisEngine:
         df['Score_MA'] = ma_score
 
         df['Score_RSI'] = df['RSI14'].clip(0, 100)
-        
         df['Score_PPO'] = df['PPO_Hist'].rolling(60).apply(
             lambda x: (pd.Series(x).rank(pct=True).iloc[-1] * 100) if len(x) > 0 else 50, raw=False
         )
@@ -420,11 +419,11 @@ class TechnicalAnalysisEngine:
         mode_c_full_idx = -999
         mode_c_danger_flag = False
 
-        # 新增：高檔惡化隔日反彈清倉狀態追蹤
-        recent_new_high_idx = -999
-        recent_new_high_temp = 0.0
-        recent_rsi_low = 0.0
-        mode_rebound_exit_pending = False
+        # 追蹤持倉期間的高點與觸發器
+        trade_high = 0.0
+        trade_high_idx = -999
+        trade_high_temp = 0.0
+        extreme_reversal_trigger_idx = -999
 
         for i in range(len(df)):
             current_date = df.index[i]
@@ -448,10 +447,6 @@ class TechnicalAnalysisEngine:
             open_p = df['Open'].iloc[i]
             high_p = df['High'].iloc[i]
             low_p = df['Low'].iloc[i]
-            vol_p = df['Volume'].iloc[i]
-
-            prev_close = df['Close'].iloc[i-1]
-            prev_vol = df['Volume'].iloc[i-1]
 
             m5 = df['MA5'].iloc[i]
             m10 = df['MA10'].iloc[i]
@@ -480,6 +475,15 @@ class TechnicalAnalysisEngine:
             prev_temp_val = df['Temperature'].iloc[i-1]
             temp_ma10 = df['Temperature_MA10'].iloc[i]
 
+            was_in_position = in_position
+
+            # 更新持倉期間最高價狀態
+            if in_position:
+                if high_p > trade_high:
+                    trade_high = high_p
+                    trade_high_idx = i
+                    trade_high_temp = temp_val
+
             # ----------------------------------------------------
             # 濾網條件計算
             # ----------------------------------------------------
@@ -496,19 +500,6 @@ class TechnicalAnalysisEngine:
 
             cd_buy_active = (i - last_buy_index) < 5
             cond_ma20_up_5d = m20_diff5 > 0
-
-            # ----------------------------------------------------
-            # 追蹤持倉波段新高 (用於高檔惡化清倉檢測)
-            # ----------------------------------------------------
-            if in_position:
-                close_20d_max = df['Close'].iloc[max(0, i-19):i+1].max()
-                if close_p >= close_20d_max and close_p > 0:
-                    recent_new_high_idx = i
-                    recent_new_high_temp = temp_val
-                    # 前低點定義：創高前10天內的RSI最低點
-                    recent_rsi_low = df['RSI14'].iloc[max(0, i-10):i].min() if i > 10 else 50.0
-            else:
-                mode_rebound_exit_pending = False
 
             # ----------------------------------------------------
             # 進場訊號觸發條件
@@ -554,6 +545,7 @@ class TechnicalAnalysisEngine:
                 is_yang_near_ma20 = (close_p > open_p) and (high_p >= m20 * 0.985) and (close_p < m20)
                 if is_yang_near_ma20:
                     mode_a_ma20_fail_flag = True
+
                 if mode_a_ma20_fail_flag and (close_p < m5):
                     if m10 > m5:
                         mode_a_ma20_fail_exit = True
@@ -566,6 +558,9 @@ class TechnicalAnalysisEngine:
 
             mode_bc_3d_failed = in_position and (entry_mode in ["B", "C"]) and (1 <= days_since_entry <= 3) and (close_p < entry_low)
 
+            # ----------------------------------------------------
+            # 模式 C 滿倉驟降清倉條件
+            # ----------------------------------------------------
             mode_c_temp_crash_exit = False
             if in_position and (entry_mode == "C") and (position_ratio == 1.0):
                 days_since_full = i - mode_c_full_idx
@@ -578,6 +573,26 @@ class TechnicalAnalysisEngine:
                         mode_c_temp_crash_exit = True
 
             # ----------------------------------------------------
+            # 新增: 高位爆量轉弱清倉條件 (新高5日內惡劣跌破)
+            # ----------------------------------------------------
+            mode_top_reversal_trigger = False
+            if in_position and (extreme_reversal_trigger_idx == -999) and (trade_high_idx != -999):
+                days_from_high = i - trade_high_idx
+                if 0 <= days_from_high <= 5:
+                    ppo_hist_turned_neg = (ppo_hist < 0) and (prev_ppo_hist >= 0)
+                    temp_drop_from_high = trade_high_temp - temp_val
+                    
+                    rsi_prev_low = df['RSI14'].iloc[max(0, i-10):i].min() if i > 0 else 0
+                    rsi_lower_than_prev = (rsi < rsi_prev_low)
+                    
+                    prev_vol = df['Volume'].iloc[i-1] if i > 0 else 1.0
+                    vol_surge = (df['Volume'].iloc[i] >= 1.4 * prev_vol)
+                    price_down = (close_p < df['Close'].iloc[i-1]) if i > 0 else False
+                    
+                    if ppo_hist_turned_neg and (temp_drop_from_high > 30.0) and rsi_lower_than_prev and vol_surge and price_down:
+                        mode_top_reversal_trigger = True
+
+            # ----------------------------------------------------
             # 邏輯判定順序
             # ----------------------------------------------------
             act = "觀望待變"
@@ -586,18 +601,20 @@ class TechnicalAnalysisEngine:
             if mode_a_search_new_low and (i - mode_a_search_start_idx > 7):
                 mode_a_search_new_low = False
 
-            # 0. 隔日反彈清倉執行 (最優先)
-            if mode_rebound_exit_pending and in_position:
-                act = "🛑 隔日反彈清倉(高檔爆量殺跌)"
-                rsn = f"前日觸發創高後極端惡化(PPO跌破50/溫度降>30/RSI破底/爆量跌)，依策略於今日反彈時無條件全數清倉"
-                in_position = False
-                position_ratio = 0.0
-                entry_mode = ""
-                mode_rebound_exit_pending = False
-                mode_a_ma20_fail_flag = False
-                mode_c_danger_flag = False
-
             # 1. 各項清倉機制優先檢測
+            if in_position and (extreme_reversal_trigger_idx != -999) and (i > extreme_reversal_trigger_idx):
+                # 執行反彈清倉 (判斷今日是否有高於昨日收盤，或今日收紅，或等待超時強制砍倉)
+                is_bounce = (high_p > df['Close'].iloc[i-1]) or (close_p > open_p) or (i - extreme_reversal_trigger_idx >= 2)
+                if is_bounce:
+                    act = "🛑 頂部爆量反彈清倉"
+                    rsn = "前次觸發頂部轉弱警報(新高後量價崩跌)，今日趁反彈(或時限已到)全數清倉"
+                    in_position = False
+                    position_ratio = 0.0
+                    entry_mode = ""
+                    mode_b_pending = False
+                    mode_a_ma20_fail_flag = False
+                    mode_c_danger_flag = False
+                    
             elif ppo_dc_exit and in_position:
                 act = "🛑 100%清倉(PPO死叉+跌破MA20+趨勢轉空)"
                 rsn = f"PPO出現死叉且收盤價(${close_p:.2f})跌破MA20(${m20:.2f})，T({temp_val:.1f})小於T10均，趨勢轉空，無條件全數清倉"
@@ -614,7 +631,6 @@ class TechnicalAnalysisEngine:
                 position_ratio = 0.0
                 entry_mode = ""
                 mode_a_ma20_fail_flag = False
-                
                 mode_a_search_new_low = True
                 mode_a_search_start_idx = i
                 mode_a_last_exit_min_low = df['Low'].iloc[entry_index:i+1].min()
@@ -664,21 +680,12 @@ class TechnicalAnalysisEngine:
                 entry_mode = ""
                 mode_c_danger_flag = False
 
-            # 2. 新增：高檔惡化預警 (新高5日內觸發)
-            elif in_position and (1 <= (i - recent_new_high_idx) <= 5):
-                temp_drop = recent_new_high_temp - temp_val
-                ppo_negative = (ppo < 50.0)
-                rsi_break_low = (rsi < recent_rsi_low)
-                
-                vol_ratio = vol_p / prev_vol if prev_vol > 0 else 1.0
-                heavy_drop = (close_p < prev_close) and (vol_ratio >= 1.5)
-                
-                if ppo_negative and (temp_drop > 30.0) and rsi_break_low and heavy_drop:
-                    act = "⚠️ 高檔惡化預警(準備隔日反彈清倉)"
-                    rsn = f"創高5日內動能崩壞(PPO<50, 溫度驟降{temp_drop:.1f}度, RSI破前低)且大放量下跌，鎖定隔日反彈全數清倉"
-                    mode_rebound_exit_pending = True
+            elif mode_top_reversal_trigger and in_position:
+                extreme_reversal_trigger_idx = i
+                act = "⚠️ 頂部轉弱警報(待反彈清倉)"
+                rsn = f"創高後5日內PPO轉負、降溫{temp_drop_from_high:.1f}度、RSI破前低且爆量1.4倍下跌，鎖定次日反彈清倉"
 
-            # 3. 處理模式 B 之 T+1 延遲建倉
+            # 2. 處理模式 B 之 T+1 延遲建倉
             elif mode_b_pending:
                 if cond_bear_or_underwater:
                     act = "🚫 模式B建倉取消(市場環境轉壞)"
@@ -704,7 +711,7 @@ class TechnicalAnalysisEngine:
                     entry_mode = "B"
                     mode_b_pending = False
 
-            # 4. 加倉機制檢測
+            # 3. 加倉機制檢測
             elif (position_ratio == 0.5) and (close_p > m20) and (bb_u_diff5 > 0):
                 act = "🚀 市場起立:準備起飛(加碼補滿倉)"
                 rsn = f"已有半倉，股價站上MA20(${m20:.2f})且布林上軌5日持續擴張，補滿至100%滿倉"
@@ -714,7 +721,7 @@ class TechnicalAnalysisEngine:
                     mode_c_full_idx = i
                     mode_c_danger_flag = False
 
-            # 5. 模式 A 觸發「尋找新低點」重新建倉
+            # 4. 模式 A 觸發「尋找新低點」重新建倉
             elif not in_position and mode_a_search_new_low:
                 days_searching = i - mode_a_search_start_idx
                 is_touch_bb_lower = low_p <= bb_l * 1.005
@@ -738,7 +745,7 @@ class TechnicalAnalysisEngine:
                     act = "🔍 模式A尋找新低點中"
                     rsn = f"離場後尋找新低點第{days_searching}/7天，等待股價觸及布林下軌(${bb_l:.2f})並跌破前低(${mode_a_last_exit_min_low:.2f})"
 
-            # 6. 新進場觸發檢測
+            # 5. 新進場觸發檢測
             elif not in_position and not cd_buy_active:
                 if mode_a_buy_signal:
                     act = "🟢 模式A:超賣強彈(建半倉)"
@@ -790,7 +797,7 @@ class TechnicalAnalysisEngine:
                         position_ratio = 0.5
                         entry_mode = "C"
 
-            elif in_position:
+            elif in_position and not (mode_top_reversal_trigger or (extreme_reversal_trigger_idx != -999)):
                 if entry_mode == "A" and 1 <= days_since_entry <= 7 and mode_a_ma20_fail_flag and (close_p < m5) and (m10 <= m5):
                     act = f"✊ 模式A續抱中(MA10<=MA5免清倉)"
                     rsn = f"模式A建倉7天內衝擊MA20受阻且今日跌破MA5，但因MA10({m10:.2f})<=MA5({m5:.2f})，不觸發清倉繼續持有"
@@ -801,6 +808,17 @@ class TechnicalAnalysisEngine:
             action_list.append(act)
             reason_list.append(rsn)
             pos_ratio_list.append(position_ratio)
+            
+            # 持倉狀態轉換時重置追蹤器
+            if not was_in_position and in_position:
+                trade_high = high_p
+                trade_high_idx = i
+                trade_high_temp = temp_val
+            elif was_in_position and not in_position:
+                trade_high = 0.0
+                trade_high_idx = -999
+                trade_high_temp = 0.0
+                extreme_reversal_trigger_idx = -999
 
         df['Advice_Action'] = action_list
         df['Advice_Reason'] = reason_list
@@ -836,7 +854,6 @@ class TechnicalAnalysisEngine:
         temp_val = df['Temperature'].iloc[i]
         temp_ma10 = df['Temperature_MA10'].iloc[i]
 
-        # 否決條件
         is_ma60_down = m60 < df['MA60'].iloc[i-1]
         is_bear_market = is_ma60_down and (close_p < m60)
         is_ppo_underwater = (ppo < 50.0) and (ppo_sig < 50.0)
@@ -850,11 +867,9 @@ class TechnicalAnalysisEngine:
 
         cond_ma20_up_5d = m20_diff5 > 0
 
-        # 模式 A 檢查
         rsi_recent_oversold = (df['RSI14'].iloc[max(0, i-4):i+1] < 30.0).any()
         mode_a_signal = rsi_recent_oversold and (rsi_diff_1 >= 8.0)
 
-        # 模式 B 檢查
         cond_b_env = ((m20 > m60) or (ppo > 50.0)) and (close_p > m60) and (ppo > 50.0)
         cond_b_rsi = (40.0 <= prev_rsi <= 50.0) and (rsi_diff_1 > 0)
         touched_ma20_recent = (df['Low'].iloc[max(0, i-1):i+1] <= df['MA20'].iloc[max(0, i-1):i+1] * 1.015).any()
@@ -864,14 +879,12 @@ class TechnicalAnalysisEngine:
         )
         mode_b_signal = cond_b_env and cond_b_rsi and cond_b_price
 
-        # 模式 C 檢查
         close_15d_max = df['Close'].iloc[max(0, i-14):i].max() if i >= 15 else df['Close'].iloc[:i].max()
         cond_c_ma_align = (close_p > m20) and (m20 > m60) and cond_ma20_up_5d
         cond_c_new_high = close_p > close_15d_max
         cond_c_long_red = (close_p > open_p) and (close_p >= bb_u * 0.995)
         mode_c_signal = cond_c_ma_align and cond_c_new_high and cond_c_long_red
 
-        # 診斷判定
         reasons = []
         
         if mode_a_signal:
@@ -1209,18 +1222,20 @@ with tab1:
                         st.markdown("---")
                         st.markdown("#### 💡 當前最新策略操作建議與動態提醒")
                         
+                        # 1. 呈現歷史回測延續的持倉建議
                         act_text = latest['Advice_Action']
                         rsn_text = latest['Advice_Reason']
                         
-                        if "100%清倉" in act_text or "離場" in act_text or "停損" in act_text or "反彈清倉" in act_text:
+                        if "100%清倉" in act_text or "離場" in act_text or "停損" in act_text:
                             st.error(f"**【歷史持倉建議】{act_text}** — {rsn_text}")
-                        elif "預警" in act_text or "被禁用" in act_text or "否決" in act_text or "減倉" in act_text or "取消" in act_text:
+                        elif "被禁用" in act_text or "否決" in act_text or "減倉" in act_text or "取消" in act_text:
                             st.warning(f"**【歷史持倉建議】{act_text}** — {rsn_text}")
                         elif "模式" in act_text or "建倉" in act_text or "補滿倉" in act_text or "續抱" in act_text:
                             st.success(f"**【歷史持倉建議】{act_text}** — {rsn_text}")
                         else:
                             st.info(f"**【歷史持倉建議】{act_text}** — {rsn_text}")
 
+                        # 2. 空倉者當日獨立建倉適性提示
                         flat_title, flat_desc = TechnicalAnalysisEngine.diagnose_flat_position_entry(df_calc)
                         if "🟢" in flat_title:
                             st.success(f"**【空倉者今日建議】{flat_title}** — {flat_desc}")
