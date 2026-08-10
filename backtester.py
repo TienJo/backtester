@@ -533,9 +533,9 @@ class TechnicalAnalysisEngine:
             )
             mode_b_buy_signal = cond_b_env and cond_b_rsi and cond_b_price
 
-            # 模式 C: 平台突破
+            # 模式 C: 平台突破 (修改：不再強制要求 MA20 > MA60)
             close_15d_max = df['Close'].iloc[max(0, i-14):i].max() if i >= 15 else df['Close'].iloc[:i].max()
-            cond_c_ma_align = (close_p > m20) and (m20 > m60) and cond_ma20_up_5d
+            cond_c_ma_align = (close_p > m20) and (close_p > m60) and cond_ma20_up_5d
             cond_c_new_high = close_p > close_15d_max
             cond_c_long_red = (close_p > open_p) and (close_p >= bb_u * 0.995)
             mode_c_buy_signal = cond_c_ma_align and cond_c_new_high and cond_c_long_red
@@ -821,7 +821,7 @@ class TechnicalAnalysisEngine:
                         rsn = "市場溫度10日線下滑且溫度<50度，拒絕開倉"
                     else:
                         act = "🟢 模式C:平台突破(建半倉)"
-                        rsn = f"【模式C平台突破】多頭排列下創15日新高、MA20 5日趨勢向上且收盤達布林上軌0.995倍，開倉50%半倉"
+                        rsn = f"【模式C平台突破】股價站上月季線創15日新高、MA20 5日趨勢向上且收盤達布林上軌0.995倍，開倉50%半倉"
                         last_buy_index = i
                         entry_index = i
                         entry_price = close_p
@@ -918,7 +918,7 @@ class TechnicalAnalysisEngine:
 
         # 模式 C 檢查
         close_15d_max = df['Close'].iloc[max(0, i-14):i].max() if i >= 15 else df['Close'].iloc[:i].max()
-        cond_c_ma_align = (close_p > m20) and (m20 > m60) and cond_ma20_up_5d
+        cond_c_ma_align = (close_p > m20) and (close_p > m60) and cond_ma20_up_5d
         cond_c_new_high = close_p > close_15d_max
         cond_c_long_red = (close_p > open_p) and (close_p >= bb_u * 0.995)
         mode_c_signal = cond_c_ma_align and cond_c_new_high and cond_c_long_red
@@ -945,7 +945,7 @@ class TechnicalAnalysisEngine:
             elif cond_weak_hook:
                 reasons.append("市場溫度10日線下滑且溫度<50度（弱勢勾頭）")
             else:
-                return "🟢 今日適合以【模式 C】建倉", "多頭排列下創15日新高、MA20 5日趨勢向上且收盤達布林上軌0.995倍，符合平台突破條件（可建50%半倉）"
+                return "🟢 今日適合以【模式 C】建倉", "股價站上月季線創15日新高、MA20 5日趨勢向上且收盤達布林上軌0.995倍，符合平台突破條件（可建50%半倉）"
 
         if reasons:
             return "⚠️ 今日無適合建倉模式 (觸發否決)", f"雖然技術型態接近，但因【{'; '.join(reasons)}】被系統否決開倉"
