@@ -284,6 +284,7 @@ class TechnicalAnalysisEngine:
 
         # 2. 量能與量比
         df['Vol_MA5'] = df['Volume'].rolling(5).mean()
+        df['Vol_MA60'] = df['Volume'].rolling(60).mean()
         df['Daily_Vol_Ratio'] = df['Volume'] / df['Vol_MA5'].shift(1)
 
         # 3. RSI(14) 與變化量
@@ -520,7 +521,7 @@ class TechnicalAnalysisEngine:
             # ----------------------------------------------------
             # 進場訊號觸發條件
             # ----------------------------------------------------
-            # 模式 A: 超賣強彈/抄底 (改為SKDJ判斷)
+            # 模式 A: 超賣強彈/抄底
             skdj_recent_oversold = (df['SKDJ_K'].iloc[max(0, i-4):i+1] < 20.0).any()
             skdj_gc = (skdj_k > skdj_d) and (prev_skdj_k <= prev_skdj_d)
             mode_a_buy_signal = skdj_gc and skdj_recent_oversold and (skdj_k_diff_1 >= 12.0)
@@ -1310,12 +1311,13 @@ with tab1:
                         st.markdown("#### 🎯 K線、市場溫度、RSI、SKDJ、PPO百分位 與 策略績效淨值曲線")
 
                         fig = make_subplots(
-                            rows=6, cols=1, 
+                            rows=7, cols=1, 
                             shared_xaxes=True, 
                             vertical_spacing=0.02, 
-                            row_heights=[0.3, 0.12, 0.12, 0.12, 0.12, 0.22],
+                            row_heights=[0.25, 0.12, 0.12, 0.12, 0.12, 0.12, 0.15],
                             subplot_titles=(
-                                f"{bt_symbol} K線、均線、布林通道與 AVWAP", 
+                                f"{bt_symbol} K線、均線、布林通道與 AVWAP",
+                                "成交量 與 5日/60日均量線",
                                 "動態市場溫度 T (0-100)", 
                                 "RSI(14) 指標", 
                                 "SKDJ 指標 (9, 3, 3)",
@@ -1343,43 +1345,49 @@ with tab1:
                         
                         fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['AVWAP'], mode='lines', name='AVWAP(區間錨定)', line=dict(color='#E91E63', width=2, dash='dot')), row=1, col=1)
 
-                        # Row 2: 溫度
-                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Temperature'], mode='lines', name='溫度 T', line=dict(color='#FF3D00', width=2)), row=2, col=1)
-                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Temperature_MA10'], mode='lines', name='溫度 T 10日均線', line=dict(color='#FFA726', width=1, dash='dot')), row=2, col=1)
-                        fig.add_hline(y=75, line_dash="dash", line_color="#FF1744", row=2, col=1)
-                        fig.add_hline(y=50, line_dash="dash", line_color="#00E676", row=2, col=1)
+                        # Row 2: 成交量
+                        vol_colors = ['#26a69a' if c >= o else '#ef5350' for c, o in zip(df_sub['Close'], df_sub['Open'])]
+                        fig.add_trace(go.Bar(x=df_sub.index, y=df_sub['Volume'], name='成交量', marker_color=vol_colors), row=2, col=1)
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Vol_MA5'], mode='lines', name='5日均量', line=dict(color='#FF9800', width=1.5)), row=2, col=1)
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Vol_MA60'], mode='lines', name='60日均量', line=dict(color='#2196F3', width=1.5)), row=2, col=1)
 
-                        # Row 3: RSI
-                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['RSI14'], mode='lines', name='RSI(14)', line=dict(color='#00E5FF', width=1.5)), row=3, col=1)
-                        fig.add_hline(y=70, line_dash="dot", line_color="#FF8A80", row=3, col=1)
-                        fig.add_hline(y=50, line_dash="dash", line_color="#CCCCCC", row=3, col=1)
-                        fig.add_hline(y=30, line_dash="dot", line_color="#B9F6CA", row=3, col=1)
+                        # Row 3: 溫度
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Temperature'], mode='lines', name='溫度 T', line=dict(color='#FF3D00', width=2)), row=3, col=1)
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Temperature_MA10'], mode='lines', name='溫度 T 10日均線', line=dict(color='#FFA726', width=1, dash='dot')), row=3, col=1)
+                        fig.add_hline(y=75, line_dash="dash", line_color="#FF1744", row=3, col=1)
+                        fig.add_hline(y=50, line_dash="dash", line_color="#00E676", row=3, col=1)
 
-                        # Row 4: SKDJ
-                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['SKDJ_K'], mode='lines', name='SKDJ_K', line=dict(color='#E91E63', width=1.2)), row=4, col=1)
-                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['SKDJ_D'], mode='lines', name='SKDJ_D', line=dict(color='#00BCD4', width=1.2)), row=4, col=1)
-                        fig.add_hline(y=80, line_dash="dot", line_color="#FF8A80", row=4, col=1)
-                        fig.add_hline(y=20, line_dash="dot", line_color="#B9F6CA", row=4, col=1)
+                        # Row 4: RSI
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['RSI14'], mode='lines', name='RSI(14)', line=dict(color='#00E5FF', width=1.5)), row=4, col=1)
+                        fig.add_hline(y=70, line_dash="dot", line_color="#FF8A80", row=4, col=1)
+                        fig.add_hline(y=50, line_dash="dash", line_color="#CCCCCC", row=4, col=1)
+                        fig.add_hline(y=30, line_dash="dot", line_color="#B9F6CA", row=4, col=1)
 
-                        # Row 5: PPO 百分位
-                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['PPO'], mode='lines', name='PPO 百分位(快線)', line=dict(color='#2962FF', width=1.2)), row=5, col=1)
-                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['PPO_Signal'], mode='lines', name='PPO_Signal (慢線)', line=dict(color='#FF6D00', width=1.2)), row=5, col=1)
+                        # Row 5: SKDJ
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['SKDJ_K'], mode='lines', name='SKDJ_K', line=dict(color='#E91E63', width=1.2)), row=5, col=1)
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['SKDJ_D'], mode='lines', name='SKDJ_D', line=dict(color='#00BCD4', width=1.2)), row=5, col=1)
+                        fig.add_hline(y=80, line_dash="dot", line_color="#FF8A80", row=5, col=1)
+                        fig.add_hline(y=20, line_dash="dot", line_color="#B9F6CA", row=5, col=1)
+
+                        # Row 6: PPO 百分位
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['PPO'], mode='lines', name='PPO 百分位(快線)', line=dict(color='#2962FF', width=1.2)), row=6, col=1)
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['PPO_Signal'], mode='lines', name='PPO_Signal (慢線)', line=dict(color='#FF6D00', width=1.2)), row=6, col=1)
                         
                         ppo_colors = ['#26a69a' if h >= 0 else '#ef5350' for h in df_sub['PPO_Hist']]
-                        fig.add_trace(go.Bar(x=df_sub.index, y=df_sub['PPO_Hist'], name='PPO 柱狀圖', marker_color=ppo_colors), row=5, col=1)
-                        fig.add_hline(y=50, line_dash="solid", line_color="#9E9E9E", row=5, col=1)
-                        fig.add_hline(y=0, line_dash="solid", line_color="#9E9E9E", row=5, col=1)
+                        fig.add_trace(go.Bar(x=df_sub.index, y=df_sub['PPO_Hist'], name='PPO 柱狀圖', marker_color=ppo_colors), row=6, col=1)
+                        fig.add_hline(y=50, line_dash="solid", line_color="#9E9E9E", row=6, col=1)
+                        fig.add_hline(y=0, line_dash="solid", line_color="#9E9E9E", row=6, col=1)
 
-                        # Row 6: 淨值曲線
-                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Strategy_Equity'], mode='lines', name='策略動態淨值', line=dict(color='#2E7D32', width=2)), row=6, col=1)
-                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['BH_Equity'], mode='lines', name='買入持有淨值', line=dict(color='#757575', width=1.5, dash='dot')), row=6, col=1)
-                        fig.add_hline(y=1.0, line_dash="solid", line_color="#E0E0E0", row=6, col=1)
+                        # Row 7: 淨值曲線
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Strategy_Equity'], mode='lines', name='策略動態淨值', line=dict(color='#2E7D32', width=2)), row=7, col=1)
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['BH_Equity'], mode='lines', name='買入持有淨值', line=dict(color='#757575', width=1.5, dash='dot')), row=7, col=1)
+                        fig.add_hline(y=1.0, line_dash="solid", line_color="#E0E0E0", row=7, col=1)
 
                         fig.update_layout(
                             xaxis_rangeslider_visible=False,
                             hovermode="x unified",
                             template="plotly_white",
-                            height=1200
+                            height=1350
                         )
                         st.plotly_chart(fig, use_container_width=True)
 
