@@ -740,8 +740,13 @@ class TechnicalAnalysisEngine:
                     entry_mode = "B"
                     mode_b_pending = False
 
-            # 4. 加倉機制檢測
-            elif (position_ratio == 0.5) and (close_p > m20) and (bb_u_diff5 > 0):
+            # 4. 加倉機制檢測 (分拆模式A與其他模式)
+            elif (position_ratio == 0.5) and (entry_mode == "A") and (close_p > m20) and (m5 > m20):
+                act = "🚀 模式A起飛:轉強確認(加碼補滿倉)"
+                rsn = f"模式A半倉中，股價站上MA20(${m20:.2f})且MA5(${m5:.2f})大於MA20，動能轉強補滿至100%滿倉"
+                last_buy_index = i
+                position_ratio = 1.0
+            elif (position_ratio == 0.5) and (entry_mode in ["B", "C"]) and (close_p > m20) and (bb_u_diff5 > 0):
                 act = "🚀 市場起立:準備起飛(加碼補滿倉)"
                 rsn = f"已有半倉，股價站上MA20(${m20:.2f})且布林上軌5日持續擴張，補滿至100%滿倉"
                 last_buy_index = i
