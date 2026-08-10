@@ -271,6 +271,7 @@ class TechnicalAnalysisEngine:
         df['MA5'] = df['Close'].rolling(5).mean()
         df['MA10'] = df['Close'].rolling(10).mean()
         df['MA20'] = df['Close'].rolling(20).mean()
+        df['MA25'] = df['Close'].rolling(25).mean()
         df['MA60'] = df['Close'].rolling(60).mean()
 
         std20 = df['Close'].rolling(20).std()
@@ -317,14 +318,6 @@ class TechnicalAnalysisEngine:
         df['SKDJ_K'] = rsv.ewm(span=3, adjust=False).mean()
         df['SKDJ_D'] = df['SKDJ_K'].ewm(span=3, adjust=False).mean()
 
-        # 6. AVWAP (錨定成交量加權平均價) 計算
-        sub_start_dt = pd.to_datetime(display_start_date) if display_start_date else df.index[0]
-        df['Typical_Price'] = (df['High'] + df['Low'] + df['Close']) / 3.0
-        
-        mask = df.index >= sub_start_dt
-        df['AVWAP'] = np.nan
-        df.loc[mask, 'AVWAP'] = (df.loc[mask, 'Typical_Price'] * df.loc[mask, 'Volume']).cumsum() / df.loc[mask, 'Volume'].cumsum()
-
         # 主升浪背離與放量下跌判斷
         df['Close_20_Max'] = df['Close'].shift(1).rolling(20).max()
         df['PPO_20_Max'] = df['PPO'].shift(1).rolling(20).max()
@@ -333,7 +326,7 @@ class TechnicalAnalysisEngine:
         df['Divergence_Warning'] = df['Bearish_Divergence'].rolling(10).sum() > 0
         df['Vol_Surge_Drop'] = (df['Close'] < df['Close'].shift(1)) & (df['Volume'] >= df['Volume'].shift(1) * 1.4)
 
-        # 7. 市場溫度 T 計算
+        # 6. 市場溫度 T 計算
         df['Ret20'] = df['Close'].pct_change(20)
         df['Score_Rank20'] = df['Ret20'].rolling(60).apply(
             lambda x: (pd.Series(x).rank(pct=True).iloc[-1] * 100) if len(x) > 0 else 50, raw=False
@@ -420,6 +413,8 @@ class TechnicalAnalysisEngine:
         action_list = []
         reason_list = []
         pos_ratio_list = []
+
+        sub_start_dt = pd.to_datetime(display_start_date) if display_start_date else df.index[0]
 
         last_buy_index = -999
         in_position = False
@@ -754,7 +749,7 @@ class TechnicalAnalysisEngine:
             elif not in_position and not cd_buy_active:
                 if mode_a_buy_signal:
                     act = "🟢 模式A:超賣強彈(建半倉)"
-                    rsn = f"【模式A抄底】近5日出現SKDJ_K<20，今日SKDJ金叉且K值大漲{skdj_k_diff_1:.1f}點(>=12)，建立50%半倉"
+                    rsn = f"【模式A抄底】近5日出現SKDJ_K<20，今日SKDJ金叉且K值急彈{skdj_k_diff_1:.1f}點(>=12)，建立50%半倉"
                     last_buy_index = i
                     entry_index = i
                     entry_price = close_p
@@ -1316,7 +1311,7 @@ with tab1:
                             vertical_spacing=0.02, 
                             row_heights=[0.25, 0.12, 0.12, 0.12, 0.12, 0.12, 0.15],
                             subplot_titles=(
-                                f"{bt_symbol} K線、均線、布林通道與 AVWAP",
+                                f"{bt_symbol} K線、均線(5/10/20/25/60)與布林通道",
                                 "成交量 與 5日/60日均量線",
                                 "動態市場溫度 T (0-100)", 
                                 "RSI(14) 指標", 
@@ -1338,12 +1333,11 @@ with tab1:
                         fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['MA5'], mode='lines', name='MA5', line=dict(color='#FF9800', width=1.2)), row=1, col=1)
                         fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['MA10'], mode='lines', name='MA10', line=dict(color='#00BCD4', width=1.2)), row=1, col=1)
                         fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['MA20'], mode='lines', name='MA20(月線)', line=dict(color='#2196F3', width=1.5)), row=1, col=1)
+                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['MA25'], mode='lines', name='MA25', line=dict(color='#9C27B0', width=1.5)), row=1, col=1)
                         fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['MA60'], mode='lines', name='MA60(季線)', line=dict(color='#78909C', width=1.5)), row=1, col=1)
 
                         fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['BB_Upper'], mode='lines', name='布林上軌', line=dict(color='#AB47BC', width=1, dash='dash')), row=1, col=1)
                         fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['BB_Lower'], mode='lines', name='布林下軌', line=dict(color='#AB47BC', width=1, dash='dash')), row=1, col=1)
-                        
-                        fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['AVWAP'], mode='lines', name='AVWAP(區間錨定)', line=dict(color='#E91E63', width=2, dash='dot')), row=1, col=1)
 
                         # Row 2: 成交量
                         vol_colors = ['#26a69a' if c >= o else '#ef5350' for c, o in zip(df_sub['Close'], df_sub['Open'])]
@@ -1400,10 +1394,10 @@ with tab1:
                         show_df['SKDJ_K'] = show_df['SKDJ_K'].round(2)
                         show_df['SKDJ_D'] = show_df['SKDJ_D'].round(2)
                         show_df['PPO柱狀'] = show_df['PPO_Hist'].round(2)
-                        show_df['AVWAP'] = show_df['AVWAP'].round(2)
+                        show_df['MA25'] = show_df['MA25'].round(2)
                         show_df['持倉比率'] = (show_df['Position_Ratio'] * 100).astype(int).astype(str) + "%"
                         
-                        show_cols = ["Open", "High", "Low", "Close", "AVWAP", "Volume", "持倉比率", "市場溫度 T", "RSI(14)", "SKDJ_K", "SKDJ_D", "PPO柱狀", "Reason_5D", "Reason_20D", "Advice_Action", "Advice_Reason"]
+                        show_cols = ["Open", "High", "Low", "Close", "MA25", "Volume", "持倉比率", "市場溫度 T", "RSI(14)", "SKDJ_K", "SKDJ_D", "PPO柱狀", "Reason_5D", "Reason_20D", "Advice_Action", "Advice_Reason"]
                         rename_dict = {
                             "Reason_5D": "5日格局原因",
                             "Reason_20D": "20日格局原因",
