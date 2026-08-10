@@ -282,7 +282,6 @@ class TechnicalAnalysisEngine:
         df['BB_Upper_5D_Diff'] = df['BB_Upper'].diff(5)
         df['MA20_Diff_1D'] = df['MA20'].diff(1)
         df['MA20_Diff_5D'] = df['MA20'].diff(5)
-        df['MA25_Diff_1D'] = df['MA25'].diff(1)
 
         # 2. 量能與量比
         df['Vol_MA5'] = df['Volume'].rolling(5).mean()
@@ -432,9 +431,6 @@ class TechnicalAnalysisEngine:
         mode_a_search_start_idx = -999
         mode_a_last_exit_min_low = 999999.0
         mode_a_ppo95_dc_flag = False
-        mode_a_fake_rebound_flag = False
-        
-        mode_c_ppo95_dc_flag = False
         
         mode_b_pending = False
         mode_b_pending_low = 0.0
@@ -472,7 +468,6 @@ class TechnicalAnalysisEngine:
             m60 = df['MA60'].iloc[i]
             m20_diff = df['MA20_Diff_1D'].iloc[i]
             m20_diff5 = df['MA20_Diff_5D'].iloc[i]
-            m25_diff = df['MA25_Diff_1D'].iloc[i]
 
             bb_u = df['BB_Upper'].iloc[i]
             bb_l = df['BB_Lower'].iloc[i]
@@ -540,7 +535,7 @@ class TechnicalAnalysisEngine:
 
             # 模式 C: 平台突破
             close_15d_max = df['Close'].iloc[max(0, i-14):i].max() if i >= 15 else df['Close'].iloc[:i].max()
-            cond_c_ma_align = (close_p > m20) and (close_p > m60) and cond_ma20_up_5d
+            cond_c_ma_align = (close_p > m20) and (m20 > m60) and cond_ma20_up_5d
             cond_c_new_high = close_p > close_15d_max
             cond_c_long_red = (close_p > open_p) and (close_p >= bb_u * 0.995)
             mode_c_buy_signal = cond_c_ma_align and cond_c_new_high and cond_c_long_red
@@ -550,18 +545,13 @@ class TechnicalAnalysisEngine:
             # ----------------------------------------------------
             ppo_dc = (ppo < ppo_sig) and (prev_ppo >= prev_ppo_sig)
             
-            # 模式 A & C: 紀錄創高後大於95的死叉狀態
+            # 模式 A: 紀錄創高後大於95的死叉狀態
             recent_new_high = (df['Close'].iloc[max(0, i-5):i+1] > df['Close_20_Max'].iloc[max(0, i-5):i+1]).any()
             if in_position and (entry_mode == "A") and recent_new_high and ppo_dc and (ppo >= 95.0):
                 mode_a_ppo95_dc_flag = True
-            if in_position and (entry_mode == "C") and recent_new_high and ppo_dc and (ppo >= 95.0):
-                mode_c_ppo95_dc_flag = True
                 
-            # 模式 A: 跌破 MA25 清倉
+            # 模式 A: 新增跌破 MA25 清倉
             mode_a_ppo95_ma25_exit = in_position and (entry_mode == "A") and mode_a_ppo95_dc_flag and (close_p < m25)
-            
-            # 模式 C: 跌破 MA25 清倉
-            mode_c_ppo95_ma25_exit = in_position and (entry_mode == "C") and mode_c_ppo95_dc_flag and (close_p < m25)
             
             k_body_drop_pct = ((open_p - close_p) / open_p) * 100.0 if open_p > 0 else 0.0
             ppo_dc_exit = ppo_dc and (close_p < m20) and (temp_val < temp_ma10) and (k_body_drop_pct > 2.5)
@@ -593,15 +583,6 @@ class TechnicalAnalysisEngine:
                 if mode_a_ma20_fail_flag and (close_p < m5):
                     if m10 > m5:
                         mode_a_ma20_fail_exit = True
-
-            # 清倉 2.7: 模式 A 防假反彈清倉 (MA25向下，陽線上探MA20未站穩，後跌破MA10)
-            mode_a_fake_rebound_exit = False
-            if in_position and (entry_mode == "A"):
-                if (m25_diff < 0) and (close_p > open_p) and (high_p >= m20 * 0.985) and (low_p < m20):
-                    mode_a_fake_rebound_flag = True
-                
-                if mode_a_fake_rebound_flag and (close_p < m10):
-                    mode_a_fake_rebound_exit = True
 
             # 清倉 3: 模式 B 高位獲利清倉
             close_20d_max = df['Close'].iloc[max(0, i-19):i+1].max()
@@ -647,8 +628,6 @@ class TechnicalAnalysisEngine:
                 mode_b_pending = False
                 mode_a_ma20_fail_flag = False
                 mode_a_ppo95_dc_flag = False
-                mode_c_ppo95_dc_flag = False
-                mode_a_fake_rebound_flag = False
                 
             elif mode_a_ppo95_ma25_exit:
                 act = "🛑 模式A創高死叉跌破MA25清倉"
@@ -659,35 +638,6 @@ class TechnicalAnalysisEngine:
                 mode_b_pending = False
                 mode_a_ma20_fail_flag = False
                 mode_a_ppo95_dc_flag = False
-                mode_c_ppo95_dc_flag = False
-                mode_a_fake_rebound_flag = False
-
-            elif mode_c_ppo95_ma25_exit:
-                act = "🛑 模式C創高死叉跌破MA25清倉"
-                rsn = f"模式C建倉後創主升浪新高且PPO曾於高位(>95)死叉，今日收盤(${close_p:.2f})正式跌破25日均線(${m25:.2f})，觸發最終防禦全數清倉"
-                in_position = False
-                position_ratio = 0.0
-                entry_mode = ""
-                mode_b_pending = False
-                mode_a_ma20_fail_flag = False
-                mode_a_ppo95_dc_flag = False
-                mode_c_ppo95_dc_flag = False
-                mode_a_fake_rebound_flag = False
-
-            elif mode_a_fake_rebound_exit and in_position:
-                act = "🛑 模式A假反彈跌破MA10清倉"
-                rsn = f"MA25呈現下彎，模式A建倉後陽線上探MA20未能站穩，今日收盤(${close_p:.2f})跌落MA10(${m10:.2f})，確認為空頭假反彈，全數清倉"
-                in_position = False
-                position_ratio = 0.0
-                entry_mode = ""
-                mode_a_ma20_fail_flag = False
-                mode_a_ppo95_dc_flag = False
-                mode_c_ppo95_dc_flag = False
-                mode_a_fake_rebound_flag = False
-                
-                mode_a_search_new_low = True
-                mode_a_search_start_idx = i
-                mode_a_last_exit_min_low = df['Low'].iloc[entry_index:i+1].min()
 
             elif ppo_dc_exit and in_position:
                 act = "🛑 100%清倉(PPO死叉+跌破MA20+實體大跌)"
@@ -698,8 +648,6 @@ class TechnicalAnalysisEngine:
                 mode_b_pending = False
                 mode_a_ma20_fail_flag = False
                 mode_a_ppo95_dc_flag = False
-                mode_c_ppo95_dc_flag = False
-                mode_a_fake_rebound_flag = False
 
             elif mode_a_ma20_fail_exit and in_position:
                 act = "🛑 模式A觸碰MA20受阻跌破MA5清倉"
@@ -709,8 +657,6 @@ class TechnicalAnalysisEngine:
                 entry_mode = ""
                 mode_a_ma20_fail_flag = False
                 mode_a_ppo95_dc_flag = False
-                mode_c_ppo95_dc_flag = False
-                mode_a_fake_rebound_flag = False
                 
                 mode_a_search_new_low = True
                 mode_a_search_start_idx = i
@@ -724,8 +670,6 @@ class TechnicalAnalysisEngine:
                 entry_mode = ""
                 mode_a_ma20_fail_flag = False
                 mode_a_ppo95_dc_flag = False
-                mode_c_ppo95_dc_flag = False
-                mode_a_fake_rebound_flag = False
 
             elif mode_a_weak_death_exit and in_position:
                 act = "🛑 模式A弱死亡清倉"
@@ -735,8 +679,6 @@ class TechnicalAnalysisEngine:
                 entry_mode = ""
                 mode_a_ma20_fail_flag = False
                 mode_a_ppo95_dc_flag = False
-                mode_c_ppo95_dc_flag = False
-                mode_a_fake_rebound_flag = False
 
             elif mode_b_exit_near_high and in_position:
                 act = "🛑 模式B高位獲利清倉"
@@ -745,7 +687,6 @@ class TechnicalAnalysisEngine:
                 position_ratio = 0.0
                 entry_mode = ""
                 mode_a_ppo95_dc_flag = False
-                mode_c_ppo95_dc_flag = False
 
             elif mode_c_ppo_exhaust_exit and in_position:
                 act = "🛑 模式C動能衰竭清倉"
@@ -754,7 +695,6 @@ class TechnicalAnalysisEngine:
                 position_ratio = 0.0
                 entry_mode = ""
                 mode_a_ppo95_dc_flag = False
-                mode_c_ppo95_dc_flag = False
 
             elif mode_bc_3d_failed and in_position:
                 act = f"🛑 模式{entry_mode} 3日認錯停損"
@@ -763,7 +703,6 @@ class TechnicalAnalysisEngine:
                 position_ratio = 0.0
                 entry_mode = ""
                 mode_a_ppo95_dc_flag = False
-                mode_c_ppo95_dc_flag = False
 
             # 2. 模式 C 專屬極端降溫清倉機制
             elif mode_c_temp_crash_exit:
@@ -774,7 +713,6 @@ class TechnicalAnalysisEngine:
                 entry_mode = ""
                 mode_c_danger_flag = False
                 mode_a_ppo95_dc_flag = False
-                mode_c_ppo95_dc_flag = False
 
             # 3. 處理模式 B 之 T+1 延遲建倉
             elif mode_b_pending:
@@ -857,8 +795,6 @@ class TechnicalAnalysisEngine:
                     entry_mode = "A"
                     mode_a_ma20_fail_flag = False
                     mode_a_ppo95_dc_flag = False
-                    mode_c_ppo95_dc_flag = False
-                    mode_a_fake_rebound_flag = False
 
                 elif mode_b_buy_signal:
                     if cond_bear_or_underwater:
@@ -885,7 +821,7 @@ class TechnicalAnalysisEngine:
                         rsn = "市場溫度10日線下滑且溫度<50度，拒絕開倉"
                     else:
                         act = "🟢 模式C:平台突破(建半倉)"
-                        rsn = f"【模式C平台突破】股價站上月季線創15日新高、MA20 5日趨勢向上且收盤達布林上軌0.995倍，開倉50%半倉"
+                        rsn = f"【模式C平台突破】多頭排列下創15日新高、MA20 5日趨勢向上且收盤達布林上軌0.995倍，開倉50%半倉"
                         last_buy_index = i
                         entry_index = i
                         entry_price = close_p
@@ -902,15 +838,8 @@ class TechnicalAnalysisEngine:
                     rsn = f"模式A建倉7天內衝擊MA20受阻且今日跌破MA5，但因MA10({m10:.2f})<=MA5({m5:.2f})，不觸發清倉繼續持有"
                 else:
                     status_extra = ""
-                    if entry_mode == "A":
-                        if mode_a_ppo95_dc_flag:
-                            status_extra += " (防守MA25)"
-                        if mode_a_fake_rebound_flag:
-                            status_extra += " (假反彈警戒中)"
-                            
-                    if entry_mode == "C" and mode_c_ppo95_dc_flag:
-                        status_extra = " (防守MA25)"
-                        
+                    if entry_mode == "A" and mode_a_ppo95_dc_flag:
+                        status_extra = " (已觸發過熱死叉，防守MA25)"
                     act = f"✊ 模式{entry_mode}續抱中{status_extra}"
                     rsn = f"當前持倉{int(position_ratio*100)}%，未觸發清倉或減倉條件，行情運作正常"
 
@@ -989,7 +918,7 @@ class TechnicalAnalysisEngine:
 
         # 模式 C 檢查
         close_15d_max = df['Close'].iloc[max(0, i-14):i].max() if i >= 15 else df['Close'].iloc[:i].max()
-        cond_c_ma_align = (close_p > m20) and (close_p > m60) and cond_ma20_up_5d
+        cond_c_ma_align = (close_p > m20) and (m20 > m60) and cond_ma20_up_5d
         cond_c_new_high = close_p > close_15d_max
         cond_c_long_red = (close_p > open_p) and (close_p >= bb_u * 0.995)
         mode_c_signal = cond_c_ma_align and cond_c_new_high and cond_c_long_red
@@ -1016,7 +945,7 @@ class TechnicalAnalysisEngine:
             elif cond_weak_hook:
                 reasons.append("市場溫度10日線下滑且溫度<50度（弱勢勾頭）")
             else:
-                return "🟢 今日適合以【模式 C】建倉", "股價站上月季線創15日新高、MA20 5日趨勢向上且收盤達布林上軌0.995倍，符合平台突破條件（可建50%半倉）"
+                return "🟢 今日適合以【模式 C】建倉", "多頭排列下創15日新高、MA20 5日趨勢向上且收盤達布林上軌0.995倍，符合平台突破條件（可建50%半倉）"
 
         if reasons:
             return "⚠️ 今日無適合建倉模式 (觸發否決)", f"雖然技術型態接近，但因【{'; '.join(reasons)}】被系統否決開倉"
@@ -1103,7 +1032,7 @@ class TechnicalAnalysisEngine:
         primary_alert = " | ".join(alerts) if alerts else "✅ 技術面平穩運行"
 
         if "PPO高位(>95)死叉" in primary_alert:
-            diag_detail = f"股價創主升浪新高後，PPO於極高位(>95)出現死亡交叉。若為A或C模式持倉，請嚴格以25日均線(${m25:.2f})作為最終防守清倉點。"
+            diag_detail = f"股價創主升浪新高後，PPO於極高位(>95)出現死亡交叉。若為A模式持倉，請嚴格以25日均線(${m25:.2f})作為最終防守清倉點。"
         elif "高檔背離放量死叉" in primary_alert:
             diag_detail = f"發生價創新高但PPO未創新的背離，且今日放量下跌並形成低於50的死亡交叉，觸發全面清倉防禦條件。"
         elif "跌破20日線且實體大跌" in primary_alert:
