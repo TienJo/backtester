@@ -598,13 +598,15 @@ class TechnicalAnalysisEngine:
             else:
                 mode_a_weak_death_exit = False
 
-            # 清倉 2.6: 模式 A 建倉 7 天內靠近 MA20 未破且跌破 MA5 (配 MA10 > MA5)
+            # 清倉 2.6: 模式 A 建倉 7 天內陽線接近/接觸 MA20 後跌破 MA5 (配 MA10 > MA5)
             mode_a_ma20_fail_exit = False
             if in_position and (entry_mode == "A") and (1 <= days_since_entry <= 7):
-                is_yang_near_ma20 = (close_p > open_p) and (high_p >= m20 * 0.985) and (close_p < m20)
-                if is_yang_near_ma20:
+                # 只要是陽線且最高價接近或接觸 MA20 (高於等於 MA20 的 98.5%)
+                is_yang_touch_ma20 = (close_p > open_p) and (high_p >= m20 * 0.985)
+                if is_yang_touch_ma20:
                     mode_a_ma20_fail_flag = True
 
+                # 後續收盤價跌破 MA5 且 MA10 > MA5，即觸發清倉
                 if mode_a_ma20_fail_flag and (close_p < m5):
                     if m10 > m5:
                         mode_a_ma20_fail_exit = True
@@ -687,7 +689,7 @@ class TechnicalAnalysisEngine:
 
             elif mode_a_ma20_fail_exit and in_position:
                 act = "🛑 模式A觸碰MA20受阻跌破MA5清倉"
-                rsn = f"模式A建倉7天內陽線未能攻克MA20(${m20:.2f})，今日跌破MA5(${m5:.2f})且MA10(${m10:.2f})>MA5，執行清倉並開啟最長7天新低點鎖定"
+                rsn = f"模式A建倉7天內陽線曾接近/接觸MA20(${m20:.2f})，今日跌破MA5(${m5:.2f})且MA10(${m10:.2f})>MA5，執行清倉並開啟最長7天新低點鎖定"
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
@@ -817,7 +819,7 @@ class TechnicalAnalysisEngine:
             elif not in_position and not cd_buy_active:
                 if mode_a_buy_signal:
                     act = "🟢 模式A:超賣強彈(建半倉)"
-                    rsn = f"【模式A抄底】近5日SKDJ_K<20且近5日內發生金叉，金叉後K值曾出現急彈(>=12)，且布林上軌大於月線5%以上(${bb_u:.2f} > ${m20*1.05:.2f})，建立50%半倉"
+                    rsn = f"【模式A抄底】近5日SKDJ_K<20且近5日內發生金叉，金叉後K值曾急彈(>=12)，且布林上軌大於月線5%以上(${bb_u:.2f} > ${m20*1.05:.2f})，建立50%半倉"
                     last_buy_index = i
                     entry_index = i
                     entry_price = close_p
