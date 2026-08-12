@@ -317,6 +317,9 @@ class TechnicalAnalysisEngine:
         rsv = rsv.fillna(50.0)
         df['SKDJ_K'] = rsv.ewm(span=3, adjust=False).mean()
         df['SKDJ_D'] = df['SKDJ_K'].ewm(span=3, adjust=False).mean()
+        
+        # 預先計算 SKDJ 金叉狀態 (當日K大於D，且前一日K小於等於D)
+        df['SKDJ_GC'] = (df['SKDJ_K'] > df['SKDJ_D']) & (df['SKDJ_K'].shift(1) <= df['SKDJ_D'].shift(1))
 
         # 主升浪背離與放量下跌判斷
         df['Close_20_Max'] = df['Close'].shift(1).rolling(20).max()
@@ -521,8 +524,8 @@ class TechnicalAnalysisEngine:
             # ----------------------------------------------------
             # 模式 A: 超賣強彈/抄底
             skdj_recent_oversold = (df['SKDJ_K'].iloc[max(0, i-4):i+1] < 20.0).any()
-            skdj_gc = (skdj_k > skdj_d) and (prev_skdj_k <= prev_skdj_d)
-            mode_a_buy_signal = skdj_gc and skdj_recent_oversold and (skdj_k_diff_1 >= 12.0)
+            skdj_recent_gc = df['SKDJ_GC'].iloc[max(0, i-2):i+1].any()
+            mode_a_buy_signal = skdj_recent_gc and skdj_recent_oversold and (skdj_k_diff_1 >= 12.0)
 
             # 模式 B: 強勢回檔再發動
             cond_b_env = ((m20 > m60) or (ppo > 50.0)) and (close_p > m60) and (ppo > 50.0)
@@ -802,7 +805,7 @@ class TechnicalAnalysisEngine:
             elif not in_position and not cd_buy_active:
                 if mode_a_buy_signal:
                     act = "🟢 模式A:超賣強彈(建半倉)"
-                    rsn = f"【模式A抄底】近5日出現SKDJ_K<20，今日SKDJ金叉且K值急彈{skdj_k_diff_1:.1f}點(>=12)，建立50%半倉"
+                    rsn = f"【模式A抄底】近5日SKDJ_K<20且近3日金叉，今日K值急彈{skdj_k_diff_1:.1f}點(>=12)，建立50%半倉"
                     last_buy_index = i
                     entry_index = i
                     entry_price = close_p
@@ -908,6 +911,9 @@ class TechnicalAnalysisEngine:
         prev_skdj_k = df['SKDJ_K'].iloc[i-1]
         prev_skdj_d = df['SKDJ_D'].iloc[i-1]
         skdj_k_diff_1 = skdj_k - prev_skdj_k
+        
+        # 預先計算金叉狀態
+        df['SKDJ_GC'] = (df['SKDJ_K'] > df['SKDJ_D']) & (df['SKDJ_K'].shift(1) <= df['SKDJ_D'].shift(1))
 
         # 否決條件
         is_ma60_down = m60 < df['MA60'].iloc[i-1]
@@ -925,8 +931,8 @@ class TechnicalAnalysisEngine:
 
         # 模式 A 檢查
         skdj_recent_oversold = (df['SKDJ_K'].iloc[max(0, i-4):i+1] < 20.0).any()
-        skdj_gc = (skdj_k > skdj_d) and (prev_skdj_k <= prev_skdj_d)
-        mode_a_signal = skdj_gc and skdj_recent_oversold and (skdj_k_diff_1 >= 12.0)
+        skdj_recent_gc = df['SKDJ_GC'].iloc[max(0, i-2):i+1].any()
+        mode_a_signal = skdj_recent_gc and skdj_recent_oversold and (skdj_k_diff_1 >= 12.0)
 
         # 模式 B 檢查
         cond_b_env = ((m20 > m60) or (ppo > 50.0)) and (close_p > m60) and (ppo > 50.0)
@@ -949,7 +955,7 @@ class TechnicalAnalysisEngine:
         reasons = []
         
         if mode_a_signal:
-            return "🟢 今日適合以【模式 A】建倉", f"近5日SKDJ_K曾<20，今日SKDJ金叉且K值急彈{skdj_k_diff_1:.1f}點(>=12)，符合超賣強彈抄底條件（可試驗50%半倉）"
+            return "🟢 今日適合以【模式 A】建倉", f"近5日SKDJ_K曾<20且近3日發生金叉，今日K值急彈{skdj_k_diff_1:.1f}點(>=12)，符合超賣強彈抄底條件（可試驗50%半倉）"
 
         if mode_b_signal:
             if cond_bear_or_underwater:
