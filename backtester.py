@@ -279,6 +279,11 @@ class TechnicalAnalysisEngine:
         df['BB_Lower'] = df['MA20'] - (2.0 * std20)
         df['BB_Bandwidth'] = (df['BB_Upper'] - df['BB_Lower']) / df['MA20']
         
+        # 個股專屬：布林頻寬 60 日相對百分位 (0~100)
+        df['BB_Bandwidth_Pct'] = df['BB_Bandwidth'].rolling(60).apply(
+            lambda x: (pd.Series(x).rank(pct=True).iloc[-1] * 100) if len(x) > 0 else 50, raw=False
+        ).fillna(50.0)
+        
         df['BB_Upper_5D_Diff'] = df['BB_Upper'].diff(5)
         df['MA20_Diff_1D'] = df['MA20'].diff(1)
         df['MA20_Diff_5D'] = df['MA20'].diff(5)
@@ -477,6 +482,7 @@ class TechnicalAnalysisEngine:
             bb_l = df['BB_Lower'].iloc[i]
             bb_u_diff5 = df['BB_Upper_5D_Diff'].iloc[i]
             bw = df['BB_Bandwidth'].iloc[i]
+            bw_pct = df['BB_Bandwidth_Pct'].iloc[i]
 
             rsi = df['RSI14'].iloc[i]
             prev_rsi = df['RSI14'].iloc[i-1]
@@ -522,10 +528,11 @@ class TechnicalAnalysisEngine:
             # ----------------------------------------------------
             # 進場訊號觸發條件
             # ----------------------------------------------------
-            # 模式 A: 超賣強彈/抄底
+            # 模式 A: 超賣強彈/抄底 (包含布林通道不可過窄濾網: 百分位 >= 15%)
             skdj_recent_oversold = (df['SKDJ_K'].iloc[max(0, i-4):i+1] < 20.0).any()
             skdj_recent_gc = df['SKDJ_GC'].iloc[max(0, i-2):i+1].any()
-            mode_a_buy_signal = skdj_recent_gc and skdj_recent_oversold and (skdj_k_diff_1 >= 12.0)
+            cond_bb_not_too_narrow = bw_pct >= 15.0
+            mode_a_buy_signal = skdj_recent_gc and skdj_recent_oversold and (skdj_k_diff_1 >= 12.0) and cond_bb_not_too_narrow
 
             # 模式 B: 強勢回檔再發動
             cond_b_env = ((m20 > m60) or (ppo > 50.0)) and (close_p > m60) and (ppo > 50.0)
@@ -806,7 +813,7 @@ class TechnicalAnalysisEngine:
             elif not in_position and not cd_buy_active:
                 if mode_a_buy_signal:
                     act = "🟢 模式A:超賣強彈(建半倉)"
-                    rsn = f"【模式A抄底】近5日SKDJ_K<20且近3日金叉，今日K值急彈{skdj_k_diff_1:.1f}點(>=12)，建立50%半倉"
+                    rsn = f"【模式A抄底】近5日SKDJ_K<20且近3日金叉，今日K值急彈{skdj_k_diff_1:.1f}點(>=12)，且布林通道無過窄(頻寬百分位{bw_pct:.1f}%>=15%)，建立50%半倉"
                     last_buy_index = i
                     entry_index = i
                     entry_price = close_p
@@ -898,6 +905,7 @@ class TechnicalAnalysisEngine:
         m20_diff5 = df['MA20_Diff_5D'].iloc[i]
 
         bb_u = df['BB_Upper'].iloc[i]
+        bw_pct = df['BB_Bandwidth_Pct'].iloc[i]
         rsi = df['RSI14'].iloc[i]
         prev_rsi = df['RSI14'].iloc[i-1]
         rsi_diff_1 = df['RSI_Diff_1D'].iloc[i]
@@ -933,7 +941,8 @@ class TechnicalAnalysisEngine:
         # 模式 A 檢查
         skdj_recent_oversold = (df['SKDJ_K'].iloc[max(0, i-4):i+1] < 20.0).any()
         skdj_recent_gc = df['SKDJ_GC'].iloc[max(0, i-2):i+1].any()
-        mode_a_signal = skdj_recent_gc and skdj_recent_oversold and (skdj_k_diff_1 >= 12.0)
+        cond_bb_not_too_narrow = bw_pct >= 15.0
+        mode_a_signal = skdj_recent_gc and skdj_recent_oversold and (skdj_k_diff_1 >= 12.0) and cond_bb_not_too_narrow
 
         # 模式 B 檢查
         cond_b_env = ((m20 > m60) or (ppo > 50.0)) and (close_p > m60) and (ppo > 50.0)
@@ -956,7 +965,7 @@ class TechnicalAnalysisEngine:
         reasons = []
         
         if mode_a_signal:
-            return "🟢 今日適合以【模式 A】建倉", f"近5日SKDJ_K曾<20且近3日發生金叉，今日K值急彈{skdj_k_diff_1:.1f}點(>=12)，符合超賣強彈抄底條件（可試驗50%半倉）"
+            return "🟢 今日適合以【模式 A】建倉", f"近5日SKDJ_K曾<20且近3日發生金叉，今日K值急彈{skdj_k_diff_1:.1f}點(>=12)，且布林頻寬百分位({bw_pct:.1f}%>=15%)適中（可試驗50%半倉）"
 
         if mode_b_signal:
             if cond_bear_or_underwater:
@@ -1000,6 +1009,7 @@ class TechnicalAnalysisEngine:
         m60 = latest['MA60']
         bb_u = latest['BB_Upper']
         bw = latest['BB_Bandwidth']
+        bw_pct = latest['BB_Bandwidth_Pct']
         rsi = latest['RSI14']
         ppo = latest['PPO']
         ppo_sig = latest['PPO_Signal']
@@ -1055,8 +1065,8 @@ class TechnicalAnalysisEngine:
         if (ppo_hist > 0) and (ppo_hist < prev_ppo_hist):
             alerts.append("⚠️ PPO紅柱縮短(動能減弱)")
 
-        if bw < 0.07:
-            alerts.append("🟡 布林帶極度收窄(變盤在即)")
+        if bw_pct < 15.0:
+            alerts.append("🟡 布林帶極度收窄(變盤在即/限制A模式開倉)")
 
         primary_alert = " | ".join(alerts) if alerts else "✅ 技術面平穩運行"
 
