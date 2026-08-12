@@ -1395,7 +1395,7 @@ with tab1:
                             open=df_sub['Open'], high=df_sub['High'],
                             low=df_sub['Low'], close=df_sub['Close'],
                             name='K線',
-                            increasing_line_color='#26a69a', decreasing_line_color='#ef5350'
+                            increasing_line_color='#ef5350', decreasing_line_color='#26a69a'
                         ), row=1, col=1)
 
                         fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['MA5'], mode='lines', name='MA5', line=dict(color='#FF9800', width=1.2)), row=1, col=1)
@@ -1408,7 +1408,7 @@ with tab1:
                         fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['BB_Lower'], mode='lines', name='布林下軌', line=dict(color='#AB47BC', width=1, dash='dash')), row=1, col=1)
 
                         # Row 2: 成交量
-                        vol_colors = ['#26a69a' if c >= o else '#ef5350' for c, o in zip(df_sub['Close'], df_sub['Open'])]
+                        vol_colors = ['#ef5350' if c >= o else '#26a69a' for c, o in zip(df_sub['Close'], df_sub['Open'])]
                         fig.add_trace(go.Bar(x=df_sub.index, y=df_sub['Volume'], name='成交量', marker_color=vol_colors), row=2, col=1)
                         fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Vol_MA5'], mode='lines', name='5日均量', line=dict(color='#FF9800', width=1.5)), row=2, col=1)
                         fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['Vol_MA60'], mode='lines', name='60日均量', line=dict(color='#2196F3', width=1.5)), row=2, col=1)
@@ -1435,7 +1435,7 @@ with tab1:
                         fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['PPO'], mode='lines', name='PPO 百分位(快線)', line=dict(color='#2962FF', width=1.2)), row=6, col=1)
                         fig.add_trace(go.Scatter(x=df_sub.index, y=df_sub['PPO_Signal'], mode='lines', name='PPO_Signal (慢線)', line=dict(color='#FF6D00', width=1.2)), row=6, col=1)
                         
-                        ppo_colors = ['#26a69a' if h >= 0 else '#ef5350' for h in df_sub['PPO_Hist']]
+                        ppo_colors = ['#ef5350' if h >= 0 else '#26a69a' for h in df_sub['PPO_Hist']]
                         fig.add_trace(go.Bar(x=df_sub.index, y=df_sub['PPO_Hist'], name='PPO 柱狀圖', marker_color=ppo_colors), row=6, col=1)
                         fig.add_hline(y=50, line_dash="solid", line_color="#9E9E9E", row=6, col=1)
                         fig.add_hline(y=0, line_dash="solid", line_color="#9E9E9E", row=6, col=1)
