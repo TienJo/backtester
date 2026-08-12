@@ -550,6 +550,12 @@ class TechnicalAnalysisEngine:
             if in_position and (entry_mode == "A") and recent_new_high and ppo_dc and (ppo >= 95.0):
                 mode_a_ppo95_dc_flag = True
                 
+            # 模式 A: 創新高後放量下跌且PPO轉弱清倉
+            mode_a_vol_drop = (close_p < df['Close'].iloc[i-1]) and (df['Volume'].iloc[i] >= df['Volume'].iloc[i-1] * 1.5)
+            ppo_near_dc = (ppo - ppo_sig) < 2.0
+            ppo_hist_negative = ppo_hist < 0
+            mode_a_high_vol_drop_exit = in_position and (entry_mode == "A") and recent_new_high and mode_a_vol_drop and ppo_near_dc and ppo_hist_negative
+                
             # 模式 A: 新增跌破 MA25 清倉
             mode_a_ppo95_ma25_exit = in_position and (entry_mode == "A") and mode_a_ppo95_dc_flag and (close_p < m25)
             
@@ -632,6 +638,16 @@ class TechnicalAnalysisEngine:
             elif mode_a_ppo95_ma25_exit:
                 act = "🛑 模式A創高死叉跌破MA25清倉"
                 rsn = f"模式A建倉後創主升浪新高且PPO曾於高位(>95)死叉，今日收盤(${close_p:.2f})正式跌破25日均線(${m25:.2f})，觸發最終防禦全數清倉"
+                in_position = False
+                position_ratio = 0.0
+                entry_mode = ""
+                mode_b_pending = False
+                mode_a_ma20_fail_flag = False
+                mode_a_ppo95_dc_flag = False
+                
+            elif mode_a_high_vol_drop_exit:
+                act = "🛑 模式A創高放量下跌清倉"
+                rsn = f"模式A建倉後創高，今日出現放量下跌(>1.5倍)，且PPO接近死叉或已死叉，PPO柱轉負，觸發獲利了結清倉"
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
