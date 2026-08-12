@@ -549,18 +549,19 @@ class TechnicalAnalysisEngine:
             # ----------------------------------------------------
             ppo_dc = (ppo < ppo_sig) and (prev_ppo >= prev_ppo_sig)
             
-            # 紀錄創高後的狀態
-            recent_new_high = (df['Close'].iloc[max(0, i-5):i+1] > df['Close_20_Max'].iloc[max(0, i-5):i+1]).any()
+            # 紀錄死叉發生前 5 日內（包含當日）PPO 是否曾大於 95
+            ppo_recent_high95 = (df['PPO'].iloc[max(0, i-4):i+1] > 95.0).any()
             
-            # 模式 A: 紀錄創高後大於95的死叉狀態
-            if in_position and (entry_mode == "A") and recent_new_high and ppo_dc and (ppo >= 95.0):
+            # 模式 A: 紀錄死叉前5日PPO曾大於95的死叉狀態
+            if in_position and (entry_mode == "A") and ppo_dc and ppo_recent_high95:
                 mode_a_ppo95_dc_flag = True
                 
             # 模式 C: 紀錄創高後的死叉狀態
+            recent_new_high = (df['Close'].iloc[max(0, i-5):i+1] > df['Close_20_Max'].iloc[max(0, i-5):i+1]).any()
             if in_position and (entry_mode == "C") and recent_new_high and ppo_dc:
                 mode_c_dc_flag = True
                 
-            # 模式 A: 新增跌破 MA25 清倉
+            # 模式 A: 死叉前5日PPO曾大於95且跌破 MA25 清倉
             mode_a_ppo95_ma25_exit = in_position and (entry_mode == "A") and mode_a_ppo95_dc_flag and (close_p < m25)
             
             # 模式 C: 創高死叉跌破 MA25 清倉
@@ -641,8 +642,8 @@ class TechnicalAnalysisEngine:
                 mode_c_dc_flag = False
                 
             elif mode_a_ppo95_ma25_exit:
-                act = "🛑 模式A創高死叉跌破MA25清倉"
-                rsn = f"模式A建倉後創主升浪新高且PPO曾於高位(>95)死叉，今日收盤(${close_p:.2f})正式跌破25日均線(${m25:.2f})，觸發最終防禦全數清倉"
+                act = "🛑 模式A過熱死叉跌破MA25清倉"
+                rsn = f"模式A建倉後死叉前5日PPO曾高於95，今日收盤(${close_p:.2f})正式跌破25日均線(${m25:.2f})，觸發最終防禦全數清倉"
                 in_position = False
                 position_ratio = 0.0
                 entry_mode = ""
@@ -762,7 +763,7 @@ class TechnicalAnalysisEngine:
                     entry_mode = "B"
                     mode_b_pending = False
 
-            # 4. 加倉機制檢測 (分拆模式A與其他模式)
+            # 4. 加碼機制檢測 (分拆模式A與其他模式)
             elif (position_ratio == 0.5) and (entry_mode == "A") and (close_p > m20) and (m5 > m20):
                 act = "🚀 模式A起飛:轉強確認(加碼補滿倉)"
                 rsn = f"模式A半倉中，股價站上MA20(${m20:.2f})且MA5(${m5:.2f})大於MA20，動能轉強補滿至100%滿倉"
@@ -1016,8 +1017,8 @@ class TechnicalAnalysisEngine:
         ppo_dc = (ppo < ppo_sig) and (prev_1['PPO'] >= prev_1['PPO_Signal'])
         ppo_dc_under_50 = ppo_dc and (ppo < 50.0)
         
-        recent_new_high = (df['Close'].iloc[-5:] > df['Close'].shift(1).rolling(20).max().iloc[-5:]).any() if len(df) >= 25 else False
-        ppo_dc_above_95 = ppo_dc and (ppo >= 95.0) and recent_new_high
+        ppo_recent_high95 = (df['PPO'].iloc[-5:] > 95.0).any() if len(df) >= 5 else False
+        ppo_dc_above_95 = ppo_dc and ppo_recent_high95
         
         k_body_drop_pct = ((latest['Open'] - close_p) / latest['Open']) * 100.0 if latest['Open'] > 0 else 0.0
         
@@ -1034,7 +1035,7 @@ class TechnicalAnalysisEngine:
 
         alerts = []
         if ppo_dc_above_95:
-            alerts.append("⚠️ 創高後PPO高位(>95)死叉(若持倉跌破MA25建議清倉)")
+            alerts.append("⚠️ 死叉前5日PPO曾過熱(>95)(若持倉跌破MA25建議清倉)")
         elif divergence_warning and vol_surge_drop and ppo_dc_under_50:
             alerts.append("🛑 高檔背離放量死叉(觸發清倉)")
         elif ppo_dc and (close_p < m20) and (temp < temp_ma10) and (k_body_drop_pct > 2.5):
@@ -1059,8 +1060,8 @@ class TechnicalAnalysisEngine:
 
         primary_alert = " | ".join(alerts) if alerts else "✅ 技術面平穩運行"
 
-        if "PPO高位(>95)死叉" in primary_alert:
-            diag_detail = f"股價創主升浪新高後，PPO於極高位(>95)出現死亡交叉。若為A模式持倉，請嚴格以25日均線(${m25:.2f})作為最終防守清倉點。"
+        if "PPO曾過熱(>95)" in primary_alert:
+            diag_detail = f"死叉前5日內PPO曾到達極高位(>95)。若為A模式持倉，請嚴格以25日均線(${m25:.2f})作為最終防守清倉點。"
         elif "高檔背離放量死叉" in primary_alert:
             diag_detail = f"發生價創新高但PPO未創新的背離，且今日放量下跌並形成低於50的死亡交叉，觸發全面清倉防禦條件。"
         elif "跌破20日線且實體大跌" in primary_alert:
@@ -1068,7 +1069,7 @@ class TechnicalAnalysisEngine:
         elif "高檔背離" in primary_alert or "從高檔彎頭" in primary_alert:
             diag_detail = f"市場溫度高達{temp:.1f}°C，股價遠離季線，慎防高檔背離拉回。"
         elif "順勢發動" in setup_status:
-            diag_detail = f"均線多頭排列，RSI({rsi:.1f})溫溫，極度適合模式B與模式C佈局。"
+            diag_detail = f"均線多頭排列，RSI({rsi:.1f})溫和，極度適合模式B與模式C佈局。"
         else:
             diag_detail = f"當前技術面指標呈平穩定向運作，可依據K線訊號追蹤觀望。"
 
