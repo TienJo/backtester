@@ -525,13 +525,13 @@ class TechnicalAnalysisEngine:
             # ----------------------------------------------------
             # 模式 A: 超賣強彈/抄底 (包含布林上軌需大於月線5%的開口濾網)
             skdj_recent_oversold = (df['SKDJ_K'].iloc[max(0, i-4):i+1] < 20.0).any()
-            gc_window = df['SKDJ_GC'].iloc[max(0, i-3):i+1]
+            gc_window = df['SKDJ_GC'].iloc[max(0, i-4):i+1]
             skdj_recent_gc = gc_window.any()
             
             skdj_surge_after_gc = False
             if skdj_recent_gc:
-                # 尋找近 4 日內發生的最後一次金叉的絕對索引位置
-                gc_idx_abs = max(0, i-3) + np.where(gc_window)[0][-1]
+                # 尋找近 5 日內發生的最後一次金叉的絕對索引位置
+                gc_idx_abs = max(0, i-4) + np.where(gc_window)[0][-1]
                 # 檢查從該金叉日到目前的期間內，是否出現單日 K 值暴衝 >= 12 點
                 skdj_surge_after_gc = (df['SKDJ_K_Diff'].iloc[gc_idx_abs:i+1] >= 12.0).any()
 
@@ -817,7 +817,7 @@ class TechnicalAnalysisEngine:
             elif not in_position and not cd_buy_active:
                 if mode_a_buy_signal:
                     act = "🟢 模式A:超賣強彈(建半倉)"
-                    rsn = f"【模式A抄底】近5日SKDJ_K<20且近4日發生金叉，金叉後K值曾急彈(>=12)，且布林上軌大於月線5%以上(${bb_u:.2f} > ${m20*1.05:.2f})，建立50%半倉"
+                    rsn = f"【模式A抄底】近5日SKDJ_K<20且近5日內發生金叉，金叉後K值曾出現急彈(>=12)，且布林上軌大於月線5%以上(${bb_u:.2f} > ${m20*1.05:.2f})，建立50%半倉"
                     last_buy_index = i
                     entry_index = i
                     entry_price = close_p
@@ -943,12 +943,12 @@ class TechnicalAnalysisEngine:
 
         # 模式 A 檢查
         skdj_recent_oversold = (df['SKDJ_K'].iloc[max(0, i-4):i+1] < 20.0).any()
-        gc_window = df['SKDJ_GC'].iloc[max(0, i-3):i+1]
+        gc_window = df['SKDJ_GC'].iloc[max(0, i-4):i+1]
         skdj_recent_gc = gc_window.any()
         
         skdj_surge_after_gc = False
         if skdj_recent_gc:
-            gc_idx_abs = max(0, i-3) + np.where(gc_window)[0][-1]
+            gc_idx_abs = max(0, i-4) + np.where(gc_window)[0][-1]
             skdj_surge_after_gc = (df['SKDJ_K_Diff'].iloc[gc_idx_abs:i+1] >= 12.0).any()
 
         cond_bb_not_too_narrow = bb_u >= (m20 * 1.05)
@@ -975,7 +975,7 @@ class TechnicalAnalysisEngine:
         reasons = []
         
         if mode_a_signal:
-            return "🟢 今日適合以【模式 A】建倉", f"近5日SKDJ_K曾<20且近4日內發生金叉，金叉後K值曾出現急彈(>=12)，且布林上軌大於月線5%以上(${bb_u:.2f} > ${m20*1.05:.2f})（可試驗50%半倉）"
+            return "🟢 今日適合以【模式 A】建倉", f"近5日SKDJ_K曾<20且近5日內發生金叉，金叉後K值曾出現急彈(>=12)，且布林上軌大於月線5%以上(${bb_u:.2f} > ${m20*1.05:.2f})（可試驗50%半倉）"
 
         if mode_b_signal:
             if cond_bear_or_underwater:
